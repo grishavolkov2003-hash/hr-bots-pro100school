@@ -1,0 +1,72 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Не трогает деплой на VPS - деплой остаётся ручным (scp + scripts/deploy.sh).
+# Это только страховка: регрессия видна на GitHub до того как правки уйдут
+# на боевой сервер руками, а не после.
+jobs:
+  hr-bot:
+    runs-on: ubuntu-latest
+    env:
+      # Фиктивные значения - main.py/manager_bot.py конструируют
+      # TelegramClient/StringSession на импорте, но реального соединения
+      # тесты не открывают (conftest.py подменяет DB_PATH, внешние вызовы
+      # замокан через monkeypatch). Пустая TELEGRAM_SESSION_STRING валидна
+      # для StringSession (создаёт пустую сессию без сети).
+      TELEGRAM_API_ID: "12345"
+      TELEGRAM_API_HASH: "dummy"
+      TELEGRAM_SESSION_STRING: ""
+      ANTHROPIC_API_KEY: "dummy"
+      MANAGER_USERNAME: "tutor_zelimhan"
+      ZADANIE_PATH: "zadanie.jpg"
+      BOT_TOKEN: "dummy"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: hr-bot
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Run tests
+        working-directory: hr-bot
+        run: python3 -m pytest tests/ -v
+
+  brosky-bot:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_API_ID: "12345"
+      TELEGRAM_API_HASH: "dummy"
+      TELEGRAM_SESSION_STRING: ""
+      ANTHROPIC_API_KEY: "dummy"
+      MANAGER_USERNAME: "tutor_zelimhan"
+      ZADANIE_PATH: "zadanie.jpg"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: brosky-bot
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Symlink shared modules from hr-bot
+        # На проде storage.py/llm.py/sheets.py/folders.py физически лежат в
+        # /opt/hr-bot и расшарены в /opt/brosky-bot через симлинки (см.
+        # README) - в CI то же самое отношение, только относительными путями.
+        run: |
+          ln -s ../hr-bot/storage.py brosky-bot/storage.py
+          ln -s ../hr-bot/llm.py brosky-bot/llm.py
+          ln -s ../hr-bot/sheets.py brosky-bot/sheets.py
+          ln -s ../hr-bot/folders.py brosky-bot/folders.py
+      - name: Run tests
+        working-directory: brosky-bot
+        run: python3 -m pytest tests/ -v
