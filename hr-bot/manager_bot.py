@@ -1,6 +1,6 @@
 import sqlite3
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
     ReplyKeyboardMarkup, KeyboardButton, BotCommand,
@@ -15,10 +15,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MANAGER_ID = 8281593540
 BROSKY_ID = 8009920862
 ALLOWED_IDS = {MANAGER_ID, BROSKY_ID}
-
-MONTHS_RU = ["", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-             "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
-DAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
@@ -290,14 +286,11 @@ async def calls(update: Update, context):
         username = c.get("username", "?")
         subject = c.get("subject", "?")
         score = c.get("score", 0)
-        slots = c.get("slots", "")
 
         text = (
             f"📞 {name} ({username})\n"
             f"📚 {subject} | Скор: {score}/10\n"
         )
-        if slots:
-            text += f"🕐 Слоты: {slots}\n"
 
         buttons = [
             [InlineKeyboardButton("👨‍💼 Передать @brosky", callback_data=f"transfer_{uid}")],
@@ -395,7 +388,6 @@ async def signed(update: Update, context):
         username = c.get("username", "?")
         subject = c.get("subject", "?")
         score = c.get("score", 0)
-        slots = c.get("slots", "")
         status = c.get("status")
         is_signed = status == "ДОГОВОР_ПОДПИСАН"
 
@@ -404,8 +396,6 @@ async def signed(update: Update, context):
             f"📚 {subject} | Скор: {score}/10\n"
             f"{'✅ Подписан, бот молчит' if is_signed else '📝 Отправлен, ждём подписания'}\n"
         )
-        if slots:
-            text += f"🕐 Слоты/время: {slots}\n"
 
         buttons = []
         if not is_signed:

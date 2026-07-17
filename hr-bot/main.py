@@ -92,20 +92,6 @@ def _recently_sent(user_id):
         return False
 
 
-# Дословные фразы из Этапа 4 промпта (комплимент/условия/приглашение на созвон).
-# Эти шаги разрешены ТОЛЬКО когда статус уже ГОТОВ_К_СОЗВОНУ (менеджер одобрил) -
-# но модель иногда шлёт их раньше времени, не дожидаясь реального одобрения
-# (см. кейс: похвалила визитку кандидату, который всё ещё висел на ручной проверке).
-# Код - более надёжная страховка, чем инструкция в промпте.
-STAGE4_MARKERS = [
-    "реально понравилось",
-    "Расскажу коротко как мы работаем",
-    "Хочу познакомиться поближе",
-]
-APPROVED_OR_LATER_STATUSES = {
-    "ГОТОВ_К_СОЗВОНУ", "ПЕРЕДАН_МЕНЕДЖЕРУ", "СОЗВОН_НАЗНАЧЕН",
-    "ДОГОВОР_ОТПРАВЛЕН", "ДОГОВОР_ПОДПИСАН", "АККАУНТ_ПОЛУЧЕН", "ОТКРЫТ",
-}
 
 
 def parse_anketa(raw):
@@ -530,12 +516,6 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     clean_response = ANKETA_PATTERN.sub("", clean_response)
     clean_response = STATUS_PATTERN.sub("", clean_response)
     clean_response = SCORE_PATTERN.sub("", clean_response).strip()
-
-    if clean_response and any(m in clean_response for m in STAGE4_MARKERS):
-        fresh_status = (get_candidate(user_id) or {}).get("status")
-        if fresh_status not in APPROVED_OR_LATER_STATUSES:
-            print(f"[guard] Заблокирован преждевременный Этап-4 для {name} (статус={fresh_status})", flush=True)
-            return
 
     if clean_response and _recently_sent(user_id):
         print(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)
@@ -1145,12 +1125,6 @@ async def _patrol_respond(user_id, username, name, delay):
         clean_response = ANKETA_PATTERN.sub("", clean_response)
         clean_response = STATUS_PATTERN.sub("", clean_response)
         clean_response = SCORE_PATTERN.sub("", clean_response).strip()
-
-        if clean_response and any(m in clean_response for m in STAGE4_MARKERS):
-            fresh_status = (get_candidate(user_id) or {}).get("status")
-            if fresh_status not in APPROVED_OR_LATER_STATUSES:
-                print(f"[patrol][guard] Заблокирован преждевременный Этап-4 для {name} (статус={fresh_status})", flush=True)
-                return
 
         if clean_response and _recently_sent(user_id):
             print(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)

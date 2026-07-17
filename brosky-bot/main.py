@@ -784,7 +784,12 @@ async def reminder_loop():
 
 
 def _apply_decision_status(user_id, username, decision):
-    """Обновляет статус кандидата по решению без отправки сообщения (peer недоступен/таймаут)."""
+    """Обновляет статус кандидата по решению без отправки сообщения (peer недоступен).
+
+    НЕ используется для таймаута - при таймауте неизвестно, что реально
+    дошло до кандидата (мог отправиться комплимент/условия, а файлы - нет),
+    поэтому статус форсировать нельзя. Смотри except asyncio.TimeoutError
+    в decision_loop()."""
     if decision == "approved":
         update_candidate(user_id, status="ДОГОВОР_ОТПРАВЛЕН")
         update_status(username, "ДОГОВОР_ОТПРАВЛЕН", "Авто-пакет не доставлен (peer недоступен)")
@@ -988,10 +993,16 @@ async def decision_loop():
                 try:
                     await asyncio.wait_for(_process_one_decision(d), timeout=DECISION_TIMEOUT_SEC)
                 except asyncio.TimeoutError:
-                    print(f"Decision TIMEOUT id={d['id']} uid={d.get('candidate_user_id')} - применяю статус без сообщения", flush=True)
+                    print(f"Decision TIMEOUT id={d['id']} uid={d.get('candidate_user_id')} - статус НЕ меняю, шлю алерт менеджеру", flush=True)
                     candidate = get_candidate(d["candidate_user_id"])
-                    if candidate:
-                        _apply_decision_status(d["candidate_user_id"], candidate.get("username", ""), d["decision"])
+                    cand_name = candidate.get("name", "?") if candidate else "?"
+                    await send_signal(
+                        f"⚠️ ТАЙМАУТ авто-пакета для {cand_name} "
+                        f"(uid={d.get('candidate_user_id')}, decision id={d['id']}).\n"
+                        f"Каскад (комплимент/условия/авто-звонок/файлы) не завершился за "
+                        f"{DECISION_TIMEOUT_SEC}с - неизвестно, что реально дошло. "
+                        f"Статус НЕ менял, проверьте вручную переписку с кандидатом."
+                    )
                 except Exception as e:
                     print(f"Decision processing error id={d['id']}: {e}", flush=True)
                 finally:
