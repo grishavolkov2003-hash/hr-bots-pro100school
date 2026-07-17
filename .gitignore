@@ -1,0 +1,24 @@
+# Секреты - никогда не коммитить
+.env
+*.env
+google_creds.json
+*.session
+*_session*
+candidates.db
+*.db
+
+# Технические артефакты
+__pycache__/
+*.pyc
+venv/
+*.bak
+*.bak.*
+
+# Логи / служебные маркеры
+*.log
+heartbeat_manager.txt
+last_daily_stats.txt
+catchup_mass_log.txt
+qr_code.png
+qr_code.b64
+qr_state.txt
