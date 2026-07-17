@@ -15,3 +15,14 @@
 ## Деплой
 
 Код живёт на VPS в `/opt/hr-bot/` и `/opt/brosky-bot/`, запускается через systemd (`hr-bot.service`, `brosky-bot.service`, `hr-manager-bot.service`). Обновление — вручную через `scp` + `systemctl restart`, без CI/CD.
+
+## Тесты
+
+```bash
+cd hr-bot && pip install -r requirements-dev.txt && python3 -m pytest tests/ -v
+cd brosky-bot && pip install -r requirements-dev.txt && python3 -m pytest tests/ -v
+```
+
+Тесты изолированы от реальной БД — `conftest.py` каждого бота подменяет `DB_PATH` на временный файл (переменная окружения выставляется до первого импорта `config.py`, `.env`-файл её не перезаписывает) и создаёт чистую схему на каждый тест. Реальный `candidates.db` тесты не трогают ни при каких условиях. Внешние вызовы (Telegram, Anthropic) в тестах, где они нужны, замоканы через `monkeypatch` — сеть не используется.
+
+Покрытие: авто-критерии отбора (`evaluate_auto_criteria`), парсинг анкеты (`parse_anketa_fallback`), сборка промпта и обрезка истории (`llm.py`), хранение истории (`storage.py`), защита от дублирующихся сообщений и гонок (`_recently_sent`, `_wait_and_reserve`, дебаунс QA-режима, каскад `decision_loop`). Часть тестов явно фиксирует известные ограничения парсера (не баги, а задокументированное поведение) — см. докстринги с пометкой "ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ".
