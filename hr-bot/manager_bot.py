@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import logging
 from datetime import datetime
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -15,6 +16,10 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 MANAGER_ID = 8281593540
 BROSKY_ID = 8009920862
 ALLOWED_IDS = {MANAGER_ID, BROSKY_ID}
+
+# StreamHandler, не файл - процесс уже запущен под systemd, journald и так
+# перехватывает stdout/stderr со своей ротацией (journalctl -u hr-manager-bot).
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
 MAIN_MENU = ReplyKeyboardMarkup(
     [
@@ -666,9 +671,9 @@ async def notify_new_videos(context):
         try:
             await context.bot.send_message(BROSKY_ID, text, reply_markup=keyboard)
             context.bot_data[marker_key] = current_updated
-            print(f"Уведомление Броски: {name}")
+            logging.info(f"Уведомление Броски: {name}")
         except Exception as e:
-            print(f"Notify error: {e}")
+            logging.error(f"Notify error: {e}")
 
 
 async def post_init(app: Application):
@@ -693,7 +698,7 @@ async def heartbeat(context):
         with open(HEARTBEAT_PATH, "w") as f:
             f.write(datetime.now().isoformat())
     except Exception as e:
-        print(f"Heartbeat write error: {e}")
+        logging.error(f"Heartbeat write error: {e}")
 
 
 DAILY_STATS_MARKER = "/opt/hr-bot/last_daily_stats.txt"
@@ -769,7 +774,7 @@ async def daily_stats_job(context):
     try:
         await context.bot.send_message(ALERT_GROUP_ID, text)
     except Exception as e:
-        print(f"Daily stats send error: {e}")
+        logging.error(f"Daily stats send error: {e}")
 
 
 def main():
@@ -785,7 +790,7 @@ def main():
     app.job_queue.run_repeating(heartbeat, interval=120, first=5)
     app.job_queue.run_repeating(daily_stats_job, interval=600, first=30)
 
-    print("Manager bot запущен...")
+    logging.info("Manager bot запущен...")
     app.run_polling()
 
 
