@@ -26,6 +26,22 @@ def clean_db():
         os.remove(_TEST_DB)
     import storage
     storage.init_db()
+    # manager_decisions создаётся лениво внутри decision_loop() (не в
+    # storage.init_db()) - тесты, вызывающие _process_one_decision напрямую
+    # (в обход самого decision_loop), должны создать её сами.
+    conn = sqlite3.connect(_TEST_DB, timeout=10)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS manager_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_user_id INTEGER,
+            decision TEXT,
+            created_at TEXT,
+            processed INTEGER DEFAULT 0,
+            approved_by INTEGER
+        )
+    """)
+    conn.commit()
+    conn.close()
     yield
     if os.path.exists(_TEST_DB):
         os.remove(_TEST_DB)

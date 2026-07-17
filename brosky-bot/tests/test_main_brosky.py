@@ -165,10 +165,10 @@ async def test_decision_loop_cascade_not_blocked_by_barrier(make_candidate, monk
         return FakePeer()
 
     async def fake_send_message(peer, text):
-        send_msg_calls.append(text[:40])
+        send_msg_calls.append(text)
 
     async def fake_send_file(peer, path, **kwargs):
-        send_file_calls.append(path)
+        send_file_calls.append((path, kwargs))
 
     async def fake_simulate_typing(*a, **kw):
         pass
@@ -183,6 +183,19 @@ async def test_decision_loop_cascade_not_blocked_by_barrier(make_candidate, monk
 
     assert len(send_msg_calls) == 4, f"Ожидали 4 текстовых сообщения каскада, получили {len(send_msg_calls)}"
     assert len(send_file_calls) == 2, f"Ожидали 2 файла (аудио+PDF), получили {len(send_file_calls)}"
+
+    # РЕГРЕССИЯ (найдена ревью 17.07): раньше тест проверял только len() -
+    # регрессия вида "перепутал местами аудио и PDF" или "продублировал
+    # условия вместо авто-текста" прошла бы незамеченной. Теперь проверяем
+    # порядок и содержание каждого шага каскада.
+    assert "посмотрел вашу визитку" in send_msg_calls[0], "1-е сообщение должно быть комплиментом"
+    assert "75%" in send_msg_calls[1], "2-е сообщение должно быть условиями"
+    assert send_msg_calls[2] == main.AUTO_CALL_TEXT_1, "3-е сообщение должно быть AUTO_CALL_TEXT_1"
+    assert send_msg_calls[3] == main.AUTO_CALL_TEXT_2, "4-е сообщение должно быть AUTO_CALL_TEXT_2"
+
+    assert send_file_calls[0][0] == main.AUTO_CALL_AUDIO_PATH, "1-й файл должен быть аудио"
+    assert send_file_calls[0][1].get("voice_note") is True, "Аудио должно уходить как voice_note"
+    assert send_file_calls[1][0] == main.AUTO_CALL_CONTRACT_PATH, "2-й файл должен быть PDF договора"
 
     cand = main.get_candidate(702)
     assert cand["status"] == "ДОГОВОР_ОТПРАВЛЕН"

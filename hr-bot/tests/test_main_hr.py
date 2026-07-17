@@ -406,3 +406,135 @@ async def test_send_message_safe_retries_once_on_flood_wait(monkeypatch):
     assert result == "ok"
     assert len(calls) == 2, f"Ожидали ровно 1 повтор после FloodWaitError, вызовов: {len(calls)}"
     assert sleep_calls == [1], f"Ожидали ожидание e.seconds=1 перед повтором, получили {sleep_calls}"
+
+
+# ── T8: decision_loop/_process_one_decision/_apply_decision_status (0 тестов до этой задачи) ──
+
+class _FakePeer:
+    def __init__(self, id):
+        self.id = id
+
+
+@pytest.mark.asyncio
+async def test_process_one_decision_approved_sends_cascade_and_transfers(make_candidate, monkeypatch):
+    """"approved" - 3 сообщения подряд (комплимент/условия/передача Броски),
+    статус в конце ПЕРЕДАН_МЕНЕДЖЕРУ. Проверяем не только количество, но и
+    порядок/содержание - регрессия вида "перепутал местами комплимент и
+    передачу" таким тестом ловится, простым счётчиком - нет."""
+    import main
+
+    make_candidate(801, status="ТЕСТОВОЕ_НА_ПРОВЕРКЕ", username="@igorkopylov1", name="Иван")
+
+    send_calls = []
+
+    async def fake_get_entity(x):
+        return _FakePeer(801)
+
+    async def fake_send_message(peer, text):
+        send_calls.append(text)
+
+    async def fake_simulate_typing(*a, **kw):
+        pass
+
+    monkeypatch.setattr(main.client, "get_entity", fake_get_entity)
+    monkeypatch.setattr(main.client, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "_simulate_typing", fake_simulate_typing)
+
+    decision = {"id": 1, "candidate_user_id": 801, "decision": "approved", "approved_by": None}
+    await main._process_one_decision(decision)
+
+    assert len(send_calls) == 3, f"Ожидали 3 сообщения каскада, получили {len(send_calls)}"
+    assert "посмотрел вашу визитку" in send_calls[0], "Первым должен идти комплимент"
+    assert "75%" in send_calls[1], "Вторым должны идти условия с процентом"
+    assert "@brosky_manage" in send_calls[2], "Третьим - передача коллеге"
+
+    cand = main.get_candidate(801)
+    assert cand["status"] == "ПЕРЕДАН_МЕНЕДЖЕРУ"
+
+
+@pytest.mark.asyncio
+async def test_process_one_decision_rejected_sends_reason_and_sets_status(make_candidate, monkeypatch):
+    """"rejected" - одно сообщение с причиной отказа (по полю comment),
+    статус ОТКАЗ."""
+    import main
+
+    make_candidate(802, status="ТЕСТОВОЕ_НА_ПРОВЕРКЕ", username="@igorkopylov1", name="Пётр",
+                    comment="возраст=17")
+
+    send_calls = []
+
+    async def fake_get_entity(x):
+        return _FakePeer(802)
+
+    async def fake_send_message(peer, text):
+        send_calls.append(text)
+
+    async def fake_simulate_typing(*a, **kw):
+        pass
+
+    monkeypatch.setattr(main.client, "get_entity", fake_get_entity)
+    monkeypatch.setattr(main.client, "send_message", fake_send_message)
+    monkeypatch.setattr(main, "_simulate_typing", fake_simulate_typing)
+
+    decision = {"id": 2, "candidate_user_id": 802, "decision": "rejected", "approved_by": None}
+    await main._process_one_decision(decision)
+
+    assert len(send_calls) == 1
+    assert "18+" in send_calls[0], "Причина отказа должна отражать поле comment (возраст)"
+
+    cand = main.get_candidate(802)
+    assert cand["status"] == "ОТКАЗ"
+
+
+def test_apply_decision_status_sets_status_without_message_for_all_decisions():
+    """_apply_decision_status используется когда peer не резолвится - только
+    статус в БД, без реальной отправки. Покрывает все 3 ветки decision."""
+    import main
+
+    for uid, decision, expected_status in [
+        (810, "approved", "ПЕРЕДАН_МЕНЕДЖЕРУ"),
+        (811, "rejected", "ОТКАЗ"),
+        (812, "transfer", "ПЕРЕДАН_МЕНЕДЖЕРУ"),
+    ]:
+        main.create_candidate(uid, f"@u{uid}", "Т")
+        main._apply_decision_status(uid, f"@u{uid}", decision, None)
+        cand = main.get_candidate(uid)
+        assert cand["status"] == expected_status, f"{decision}: ожидали {expected_status}, получили {cand['status']}"
+
+
+@pytest.mark.asyncio
+async def test_process_one_decision_skips_stale_decision_when_newer_exists(make_candidate, monkeypatch):
+    """Защита от гонки: если пока это решение ждало своей очереди по тому же
+    кандидату появилось более новое (id больше) - устаревшее тихо
+    пропускается, не отправляет вообще ничего."""
+    import main
+    import sqlite3
+
+    make_candidate(820, status="ТЕСТОВОЕ_НА_ПРОВЕРКЕ", username="@igorkopylov1", name="Т")
+
+    conn = sqlite3.connect(main.DB_PATH, timeout=10)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS manager_decisions (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "candidate_user_id INTEGER, decision TEXT, created_at TEXT, processed INTEGER DEFAULT 0, approved_by INTEGER)"
+    )
+    conn.execute(
+        "INSERT INTO manager_decisions (id, candidate_user_id, decision, created_at) VALUES (5, 820, 'rejected', 'x')"
+    )
+    conn.commit()
+    conn.close()
+
+    send_calls = []
+
+    async def fake_get_entity(x):
+        return _FakePeer(820)
+
+    async def fake_send_message(peer, text):
+        send_calls.append(text)
+
+    monkeypatch.setattr(main.client, "get_entity", fake_get_entity)
+    monkeypatch.setattr(main.client, "send_message", fake_send_message)
+
+    stale_decision = {"id": 3, "candidate_user_id": 820, "decision": "approved", "approved_by": None}
+    await main._process_one_decision(stale_decision)
+
+    assert send_calls == [], "Устаревшее решение не должно ничего отправлять - есть более новое (id=5)"
