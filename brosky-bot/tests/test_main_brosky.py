@@ -177,6 +177,12 @@ async def test_decision_loop_cascade_not_blocked_by_barrier(make_candidate, monk
     monkeypatch.setattr(main.client, "send_message", fake_send_message)
     monkeypatch.setattr(main.client, "send_file", fake_send_file)
     monkeypatch.setattr(main, "_simulate_typing", fake_simulate_typing)
+    # T3 добавил os.path.exists()-проверку перед отправкой аудио/PDF - реальные
+    # ассеты лежат только на боевом сервере (.gitignore), на чистом чекауте
+    # (CI, любая другая машина) их нет физически. Этот тест проверяет каскад
+    # целиком, а не guard отсутствующего файла (для guard'а есть отдельный
+    # тест выше) - подменяем exists() на True для обоих путей.
+    monkeypatch.setattr(main.os.path, "exists", lambda p: p in (main.AUTO_CALL_AUDIO_PATH, main.AUTO_CALL_CONTRACT_PATH))
 
     decision = {"id": 1, "candidate_user_id": 702, "decision": "approved", "approved_by": None}
     await main._process_one_decision(decision)
