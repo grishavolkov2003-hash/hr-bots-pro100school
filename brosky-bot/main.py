@@ -719,7 +719,10 @@ async def _do_process(user_id, username, name, chat_id, candidate):
         signal_text = f"🔔 СИГНАЛ:\nКандидат: {name} ({username})\n{signal.strip()}"
         await send_signal(signal_text)
 
-    old_status = candidate["status"]
+    # РЕГРЕССИЯ (найдена ревью 17.07, тот же паттерн что и в hr-bot): candidate -
+    # снэпшот ДО _wait_and_reserve/LLM-вызова, статус мог устареть за это время.
+    # Берём заново непосредственно перед использованием.
+    old_status = (get_candidate(user_id) or candidate)["status"]
     new_status = old_status
     if statuses:
         llm_status = statuses[-1].strip()
@@ -1248,7 +1251,8 @@ async def _patrol_respond(user_id, username, name, delay):
             signal_text = f"🔔 СИГНАЛ:\nКандидат: {name} ({uname_full})\n{signal.strip()}"
             await send_signal(signal_text)
 
-        old_status = candidate["status"]
+        # см. комментарий в _do_process - тот же refetch против той же гонки
+        old_status = (get_candidate(user_id) or candidate)["status"]
         if statuses:
             llm_status = statuses[-1].strip()
             if llm_status in VALID_STATUSES and llm_status != old_status and old_status != "ПЕРЕДАН_МЕНЕДЖЕРУ":

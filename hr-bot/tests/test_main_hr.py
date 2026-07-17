@@ -337,3 +337,39 @@ async def test_handler_creds_redacted_in_conversation_and_sheets(make_candidate,
 
     assert len(mx_mish_messages) == 1, "Пересылка коллеге не должна пропасть при фиксе редактирования"
     assert "SuperSecret123" in mx_mish_messages[0], "Коллега должен получить реальный пароль, иначе некому настраивать аккаунт"
+
+
+# ── T2: гонка old_status (устаревший candidate-снэпшот) ─────────────────
+
+@pytest.mark.asyncio
+async def test_do_process_uses_fresh_status_not_stale_snapshot(make_candidate, monkeypatch):
+    """РЕГРЕССИЯ (найдена ревью 17.07): candidate передаётся в _do_process
+    снэпшотом, снятым ДО ожидания в очереди (_wait_and_reserve, до 30с) и ДО
+    вызова LLM (может занимать десятки секунд) - за это время decision_loop
+    мог реально сменить статус в БД (например на ПЕРЕДАН_МЕНЕДЖЕРУ). До
+    фикса old_status брался прямо из этого устаревшего candidate, и guard
+    пропускал LLM-статус поверх уже принятого решения менеджера. После
+    фикса - свежий get_candidate() непосредственно перед guard."""
+    import main
+
+    real = make_candidate(950, status="ПЕРЕДАН_МЕНЕДЖЕРУ", username="@igorkopylov1", name="Т")
+    stale_candidate = dict(real)
+    stale_candidate["status"] = "ТЕСТОВОЕ_ПОЛУЧЕНО"  # снэпшот до решения менеджера
+
+    def fake_get_response(conversation, candidate_info):
+        return "Спасибо! >>> СТАТУС: ТЕСТОВОЕ_НА_ПРОВЕРКЕ <<<"
+
+    async def fake_send_message(chat_id, text):
+        pass
+
+    monkeypatch.setattr(main, "get_response", fake_get_response)
+    monkeypatch.setattr(main.random, "uniform", lambda a, b: 0)
+    monkeypatch.setattr(main.client, "send_message", fake_send_message)
+
+    await main._do_process(950, "igorkopylov1", "Т", 950, stale_candidate)
+
+    cand = main.get_candidate(950)
+    assert cand["status"] == "ПЕРЕДАН_МЕНЕДЖЕРУ", (
+        f"Гонка вернулась: LLM откатил статус до {cand['status']} поверх уже "
+        f"принятого менеджером решения ПЕРЕДАН_МЕНЕДЖЕРУ"
+    )
