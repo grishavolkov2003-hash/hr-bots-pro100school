@@ -907,10 +907,22 @@ async def _process_one_decision(d):
             add_message(user_id, "bot", AUTO_CALL_TEXT_2)
             await asyncio.sleep(random.uniform(2, 4) if not is_test_user else 1)
 
+            # Проверка существования - без неё send_file кидал исключение, которое
+            # тихо гасилось общим except ниже, статус не менялся, никто не узнавал
+            # (найдено ревью 17.07). Файл может пропасть/не выложиться при деплое -
+            # это не гипотетика, ассеты разворачиваются на сервере вручную.
+            if not os.path.exists(AUTO_CALL_AUDIO_PATH):
+                print(f"[decision] Аудио-файл авто-звонка не найден: {AUTO_CALL_AUDIO_PATH}", flush=True)
+                await send_signal(f"⚠️ Не найден файл авто-звонка (аудио) для {name} ({username}). Каскад прерван до отправки файлов, статус НЕ менялся - проверьте вручную.")
+                return
             await client.send_file(peer, AUTO_CALL_AUDIO_PATH, voice_note=True)
             add_message(user_id, "bot", "[отправлено голосовое: деловое предложение]")
             await asyncio.sleep(random.uniform(2, 4) if not is_test_user else 1)
 
+            if not os.path.exists(AUTO_CALL_CONTRACT_PATH):
+                print(f"[decision] PDF договора не найден: {AUTO_CALL_CONTRACT_PATH}", flush=True)
+                await send_signal(f"⚠️ Не найден файл договора (PDF) для {name} ({username}). Аудио уже отправлено, договор - нет, статус НЕ менялся - проверьте вручную.")
+                return
             await client.send_file(peer, AUTO_CALL_CONTRACT_PATH)
             add_message(user_id, "bot", "[отправлен файл: договор партнёрский.pdf]")
 
@@ -945,7 +957,11 @@ async def _process_one_decision(d):
             print(f"Договор подписан подтверждён: {name} - сообщение про фото/диплом отправлено")
 
     except Exception as e:
-        print(f"Decision send error for {name}: {e}")
+        print(f"Decision send error for {name}: {e}", flush=True)
+        try:
+            await send_signal(f"⚠️ Ошибка при обработке решения по {name} ({username}): {e}. Проверьте вручную, что реально дошло до кандидата.")
+        except Exception:
+            pass
 
 
 # 150с хватало на 3 текстовых сообщения, но decision="approved" теперь ещё грузит

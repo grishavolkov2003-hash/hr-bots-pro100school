@@ -188,6 +188,58 @@ async def test_decision_loop_cascade_not_blocked_by_barrier(make_candidate, monk
     assert cand["status"] == "ДОГОВОР_ОТПРАВЛЕН"
 
 
+# ── T3: отсутствующий файл в авто-пакете - алерт, не тихий сбой ─────────
+
+@pytest.mark.asyncio
+async def test_process_one_decision_missing_audio_file_alerts_and_keeps_status(make_candidate, monkeypatch):
+    """РЕГРЕССИЯ: до фикса send_file для аудио/PDF вызывался без
+    os.path.exists(), исключение тихо гасилось общим except, статус не
+    менялся и никто не узнавал. После фикса - явная проверка + алерт
+    менеджеру через send_signal, каскад останавливается ДО отправки
+    (add_message/сообщения кандидату из середины каскада не отправляются
+    после точки сбоя), статус НЕ подделывается под ДОГОВОР_ОТПРАВЛЕН."""
+    import main
+
+    make_candidate(703, status="ГОТОВ_К_СОЗВОНУ", conversation_bot="brosky")
+
+    class FakePeer:
+        id = 703
+
+    async def fake_get_entity(x):
+        return FakePeer()
+
+    async def fake_send_message(peer, text):
+        pass
+
+    async def fake_send_file(peer, path, **kwargs):
+        pass
+
+    async def fake_simulate_typing(*a, **kw):
+        pass
+
+    signal_calls = []
+
+    async def fake_send_signal(text):
+        signal_calls.append(text)
+
+    monkeypatch.setattr(main.client, "get_entity", fake_get_entity)
+    monkeypatch.setattr(main.client, "send_message", fake_send_message)
+    monkeypatch.setattr(main.client, "send_file", fake_send_file)
+    monkeypatch.setattr(main, "_simulate_typing", fake_simulate_typing)
+    monkeypatch.setattr(main, "send_signal", fake_send_signal)
+    monkeypatch.setattr(main, "AUTO_CALL_AUDIO_PATH", "/nonexistent/path/audio.m4a")
+
+    decision = {"id": 2, "candidate_user_id": 703, "decision": "approved", "approved_by": None}
+    await main._process_one_decision(decision)
+
+    assert len(signal_calls) == 1, f"Ожидали ровно 1 алерт менеджеру, получили {len(signal_calls)}"
+    assert "аудио" in signal_calls[0].lower() or "audio" in signal_calls[0].lower()
+
+    cand = main.get_candidate(703)
+    assert cand["status"] != "ДОГОВОР_ОТПРАВЛЕН", \
+        "Статус не должен подделываться под 'договор отправлен' если файл не ушёл"
+
+
 # ── T1: утечка CREDS_PATTERN (пароль profi.ru открытым текстом) ─────────
 
 @pytest.mark.asyncio
