@@ -186,3 +186,77 @@ async def test_decision_loop_cascade_not_blocked_by_barrier(make_candidate, monk
 
     cand = main.get_candidate(702)
     assert cand["status"] == "ДОГОВОР_ОТПРАВЛЕН"
+
+
+# ── T1: утечка CREDS_PATTERN (пароль profi.ru открытым текстом) ─────────
+
+@pytest.mark.asyncio
+async def test_handler_creds_redacted_in_conversation_and_sheets(make_candidate, monkeypatch):
+    """РЕГРЕССИЯ: та же утечка что и в hr-bot (копия логики в этом файле) -
+    сырой текст с логином/паролем писался в историю ДО проверки
+    CREDS_PATTERN, а Sheets получал пароль открытым текстом в столбец 7.
+    После фикса - в истории редактированный плейсхолдер, столбец 7 не
+    трогается, пересылка коллеге mx_mish (единственное легитимное место)
+    по-прежнему работает."""
+    import main
+
+    make_candidate(900, status="НОВЫЙ", username="@testcreds", name="Тест Кредсов")
+
+    class FakeSender:
+        id = 900
+        username = "testcreds"
+        first_name = "Тест"
+        last_name = "Кредсов"
+        bot = False
+        access_hash = None
+
+    class FakeMessage:
+        text = "логин: myuser пароль: SuperSecret123"
+        video = None
+        video_note = None
+        voice = None
+        document = None
+        photo = None
+
+    class FakeEvent:
+        chat_id = 900
+        message = FakeMessage()
+
+        async def get_sender(self):
+            return FakeSender()
+
+    class Cell:
+        row = 5
+
+    class FakeWorksheet:
+        def find(self, username):
+            return Cell()
+
+        def update_cell(self, row, col, value):
+            sheets_calls.append((row, col, value))
+
+    class FakeSheet:
+        sheet1 = FakeWorksheet()
+
+    sheets_calls = []
+    mx_mish_messages = []
+
+    async def fake_send_message(peer, text):
+        if peer == "mx_mish":
+            mx_mish_messages.append(text)
+
+    monkeypatch.setattr(main.client, "send_message", fake_send_message)
+    monkeypatch.setattr(main.sheets_module, "_get_sheet", lambda: FakeSheet())
+
+    await main.handler(FakeEvent())
+
+    conv = main.get_conversation(900)
+    conv_texts = " ".join(c.get("text", "") for c in conv)
+    assert "SuperSecret123" not in conv_texts, "Пароль всё ещё утекает в историю переписки"
+    assert "[получены учётные данные аккаунта]" in conv_texts
+
+    assert all(col != 7 for (_row, col, _val) in sheets_calls), \
+        f"Пароль всё ещё уходит в столбец 7 Google Sheets: {sheets_calls}"
+
+    assert len(mx_mish_messages) == 1, "Пересылка коллеге не должна пропасть при фиксе редактирования"
+    assert "SuperSecret123" in mx_mish_messages[0], "Коллега должен получить реальный пароль, иначе некому настраивать аккаунт"

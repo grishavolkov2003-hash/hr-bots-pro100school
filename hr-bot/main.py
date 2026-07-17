@@ -297,32 +297,21 @@ async def handler(event):
     except:
         pass
 
-    add_message(user_id, "candidate", msg_text)
-    update_candidate(user_id, reminder_count=0)
-
-    # Подстраховка: если анкета ещё не разобрана, пробуем распарсить прямо из сырого
-    # сообщения кандидата регуляркой - на случай если LLM не проставит тег АНКЕТА
-    if not re.search(r'\d', candidate.get("comment") or ""):
-        fallback_anketa = parse_anketa_fallback(msg_text)
-        if fallback_anketa:
-            qualified, reasons = evaluate_auto_criteria(fallback_anketa)
-            comment = f"Обр: {fallback_anketa.get('образование', '')} | ЕГЭ: {fallback_anketa.get('егэ', '')} | Опыт: {fallback_anketa.get('опыт', '')} | Часы: {fallback_anketa.get('часы', '')} [regex-fallback]"
-            if not qualified and reasons:
-                comment += f" | Не прошёл автоотбор: {reasons}"
-            update_candidate(user_id, comment=comment, auto_qualified=1 if qualified else 0)
-            print(f"Анкета (fallback-регулярка): {name} — {fallback_anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
-
+    # Кредсы проверяем ДО записи сырого текста в историю/Sheets - логин/пароль
+    # от аккаунта profi.ru не должны попадать открытым текстом ни в conversation
+    # (SQLite), ни в таблицу; единственное легитимное место, куда они уходят -
+    # личка коллеге mx_mish, который реально настраивает аккаунт.
     creds_match = CREDS_PATTERN.search(msg_text)
     if creds_match:
         login, password = creds_match.group(1), creds_match.group(2)
         creds_str = f"{login} / {password}"
-        update_candidate(user_id, status="АККАУНТ_ПОЛУЧЕН")
+        add_message(user_id, "candidate", "[получены учётные данные аккаунта]")
+        update_candidate(user_id, reminder_count=0, status="АККАУНТ_ПОЛУЧЕН")
         try:
             sh = sheets_module._get_sheet()
             ws = sh.sheet1
             cell = ws.find(username)
             if cell:
-                ws.update_cell(cell.row, 7, creds_str)
                 ws.update_cell(cell.row, 8, "АККАУНТ_ПОЛУЧЕН")
         except Exception as e:
             print(f"Sheets creds error: {e}")
@@ -338,6 +327,21 @@ async def handler(event):
             print(f"Notify mx_mish error: {e}")
         print(f"Кредсы получены от {name}: {login} / ***")
         return
+
+    add_message(user_id, "candidate", msg_text)
+    update_candidate(user_id, reminder_count=0)
+
+    # Подстраховка: если анкета ещё не разобрана, пробуем распарсить прямо из сырого
+    # сообщения кандидата регуляркой - на случай если LLM не проставит тег АНКЕТА
+    if not re.search(r'\d', candidate.get("comment") or ""):
+        fallback_anketa = parse_anketa_fallback(msg_text)
+        if fallback_anketa:
+            qualified, reasons = evaluate_auto_criteria(fallback_anketa)
+            comment = f"Обр: {fallback_anketa.get('образование', '')} | ЕГЭ: {fallback_anketa.get('егэ', '')} | Опыт: {fallback_anketa.get('опыт', '')} | Часы: {fallback_anketa.get('часы', '')} [regex-fallback]"
+            if not qualified and reasons:
+                comment += f" | Не прошёл автоотбор: {reasons}"
+            update_candidate(user_id, comment=comment, auto_qualified=1 if qualified else 0)
+            print(f"Анкета (fallback-регулярка): {name} — {fallback_anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
 
     # Debounce — ждём 5 секунд, собираем все сообщения в пачку
     if user_id not in _message_buffer:
@@ -1027,18 +1031,17 @@ async def patrol_loop():
                     new_texts.reverse()
                     has_creds = False
                     for t in new_texts:
-                        add_message(user_id, "candidate", t)
                         creds_match = CREDS_PATTERN.search(t)
                         if creds_match:
                             login, password = creds_match.group(1), creds_match.group(2)
                             creds_str = f"{login} / {password}"
+                            add_message(user_id, "candidate", "[получены учётные данные аккаунта]")
                             update_candidate(user_id, status="АККАУНТ_ПОЛУЧЕН")
                             try:
                                 sh = sheets_module._get_sheet()
                                 ws = sh.sheet1
                                 cell = ws.find(c.get("username", ""))
                                 if cell:
-                                    ws.update_cell(cell.row, 7, creds_str)
                                     ws.update_cell(cell.row, 8, "АККАУНТ_ПОЛУЧЕН")
                             except Exception as e:
                                 print(f"[patrol] Sheets creds error: {e}")
@@ -1054,6 +1057,8 @@ async def patrol_loop():
                                 print(f"[patrol] Notify mx_mish error: {e}")
                             print(f"[patrol] Кредсы от {name}: {login} / ***", flush=True)
                             has_creds = True
+                        else:
+                            add_message(user_id, "candidate", t)
                     update_candidate(user_id, reminder_count=0)
 
                     if has_creds:
