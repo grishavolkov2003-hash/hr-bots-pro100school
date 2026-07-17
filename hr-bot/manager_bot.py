@@ -1,6 +1,5 @@
 import sqlite3
 import json
-import calendar as cal_mod
 from datetime import datetime, timedelta
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -102,114 +101,6 @@ def save_manager_decision(user_id, decision, approved_by=None):
     )
     conn.commit()
     conn.close()
-
-
-def get_unnotified_slots():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    rows = conn.execute(
-        "SELECT * FROM pending_slots WHERE resolved = 0 AND notified = 0"
-    ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
-
-
-def mark_slot_notified(slot_id):
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("UPDATE pending_slots SET notified = 1 WHERE id = ?", (slot_id,))
-    conn.commit()
-    conn.close()
-
-
-def set_slot_chosen_time(slot_id, chosen_time):
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute(
-        "UPDATE pending_slots SET chosen_time = ?, resolved = 1 WHERE id = ?",
-        (chosen_time, slot_id)
-    )
-    conn.commit()
-    conn.close()
-
-
-def is_slot_resolved(slot_id):
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    row = conn.execute("SELECT resolved FROM pending_slots WHERE id = ?", (slot_id,)).fetchone()
-    conn.close()
-    return (row is None) or (row[0] == 1)
-
-
-# ── Calendar builder ──
-
-def build_calendar(year, month, slot_id):
-    kb = []
-    kb.append([InlineKeyboardButton(
-        f"{MONTHS_RU[month]} {year}",
-        callback_data="cal_noop"
-    )])
-    kb.append([InlineKeyboardButton(d, callback_data="cal_noop") for d in DAYS_RU])
-
-    month_cal = cal_mod.monthcalendar(year, month)
-    today = datetime.now().date()
-
-    for week in month_cal:
-        row = []
-        for day in week:
-            if day == 0:
-                row.append(InlineKeyboardButton(" ", callback_data="cal_noop"))
-            else:
-                d = datetime(year, month, day).date()
-                if d < today:
-                    row.append(InlineKeyboardButton("·", callback_data="cal_noop"))
-                else:
-                    label = f"•{day}" if d == today else str(day)
-                    row.append(InlineKeyboardButton(
-                        label,
-                        callback_data=f"cal_day_{slot_id}_{year}-{month:02d}-{day:02d}"
-                    ))
-        kb.append(row)
-
-    # Navigation
-    prev_month = month - 1
-    prev_year = year
-    if prev_month < 1:
-        prev_month = 12
-        prev_year -= 1
-
-    next_month = month + 1
-    next_year = year
-    if next_month > 12:
-        next_month = 1
-        next_year += 1
-
-    kb.append([
-        InlineKeyboardButton("◀️", callback_data=f"cal_nav_{slot_id}_{prev_year}-{prev_month:02d}"),
-        InlineKeyboardButton("▶️", callback_data=f"cal_nav_{slot_id}_{next_year}-{next_month:02d}"),
-    ])
-
-    return InlineKeyboardMarkup(kb)
-
-
-def build_hours(slot_id, date_str):
-    kb = []
-    for start in range(9, 21, 3):
-        row = []
-        for h in range(start, min(start + 3, 22)):
-            row.append(InlineKeyboardButton(
-                f"{h:02d}:00",
-                callback_data=f"cal_hour_{slot_id}_{date_str}_{h:02d}:00"
-            ))
-        kb.append(row)
-
-    kb.append([InlineKeyboardButton(
-        "📌 После этой даты",
-        callback_data=f"cal_after_{slot_id}_{date_str}"
-    )])
-    kb.append([InlineKeyboardButton(
-        "◀️ Назад к дням",
-        callback_data=f"cal_back_{slot_id}"
-    )])
-
-    return InlineKeyboardMarkup(kb)
 
 
 # ── Command handlers ──
@@ -558,88 +449,6 @@ async def button_callback(update: Update, context):
 
     data = query.data
 
-    if data == "cal_noop":
-        await query.answer()
-        return
-
-    # ── Calendar: navigate months ──
-    if data.startswith("cal_nav_"):
-        await query.answer()
-        parts = data.replace("cal_nav_", "").split("_", 1)
-        slot_id = int(parts[0])
-        ym = parts[1].split("-")
-        year, month = int(ym[0]), int(ym[1])
-        await query.edit_message_reply_markup(reply_markup=build_calendar(year, month, slot_id))
-        return
-
-    # ── Calendar: back to days ──
-    if data.startswith("cal_back_"):
-        await query.answer()
-        slot_id = int(data.replace("cal_back_", ""))
-        now = datetime.now()
-        await query.edit_message_reply_markup(reply_markup=build_calendar(now.year, now.month, slot_id))
-        return
-
-    # ── Calendar: day selected → show hours ──
-    if data.startswith("cal_day_"):
-        await query.answer()
-        parts = data.replace("cal_day_", "").split("_", 1)
-        slot_id = int(parts[0])
-        date_str = parts[1]
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        day_name = DAYS_RU[d.weekday()]
-        day_label = f"{d.day} {MONTHS_RU[d.month][:3]} ({day_name})"
-        await query.edit_message_text(
-            query.message.text + f"\n\n📅 Выбран: {day_label}\nВыбери время:",
-            reply_markup=build_hours(slot_id, date_str),
-        )
-        return
-
-    # ── Calendar: hour selected → confirm ──
-    if data.startswith("cal_hour_"):
-        parts = data.replace("cal_hour_", "").split("_", 2)
-        slot_id = int(parts[0])
-        if is_slot_resolved(slot_id):
-            await query.answer("Этот слот уже обработан.", show_alert=True)
-            return
-        await query.answer("Время выбрано!")
-        date_str = parts[1]
-        time_str = parts[2]
-
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        day_name = DAYS_RU[d.weekday()]
-        chosen = f"{d.day} {MONTHS_RU[d.month][:3]} ({day_name}) в {time_str}"
-
-        set_slot_chosen_time(slot_id, chosen)
-
-        await query.edit_message_text(
-            query.message.text.split("\n\n📅")[0] +
-            f"\n\n✅ Выбрано: {chosen}\nБот спросит кандидата, удобно ли ему."
-        )
-        return
-
-    # ── Calendar: "после этой даты" ──
-    if data.startswith("cal_after_"):
-        parts = data.replace("cal_after_", "").split("_", 1)
-        slot_id = int(parts[0])
-        if is_slot_resolved(slot_id):
-            await query.answer("Этот слот уже обработан.", show_alert=True)
-            return
-        await query.answer("Дата выбрана!")
-        date_str = parts[1]
-
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        day_name = DAYS_RU[d.weekday()]
-        chosen = f"после {d.day} {MONTHS_RU[d.month][:3]} ({day_name})"
-
-        set_slot_chosen_time(slot_id, chosen)
-
-        await query.edit_message_text(
-            query.message.text.split("\n\n📅")[0] +
-            f"\n\n✅ Выбрано: {chosen}\nБот спросит кандидата, удобно ли ему."
-        )
-        return
-
     # ── Scheduled: mark call as scheduled ──
     if data.startswith("scheduled_"):
         user_id = int(data.replace("scheduled_", ""))
@@ -872,37 +681,6 @@ async def notify_new_videos(context):
             print(f"Notify error: {e}")
 
 
-async def notify_pending_slots(context):
-    slots = get_unnotified_slots()
-    for s in slots:
-        name = s.get("candidate_name", "?")
-        username = s.get("candidate_username", "?")
-        slots_text = s.get("slots", "?")
-        slot_id = s["id"]
-
-        cand = get_candidate_by_id(s["candidate_user_id"])
-        subject = cand.get("subject", "?") if cand else "?"
-        score = cand.get("score", 0) if cand else 0
-
-        text = (
-            f"📅 НАЗНАЧЬ СОЗВОН\n\n"
-            f"👤 {name} ({username})\n"
-            f"📚 {subject} | Скор: {score}/10\n"
-            f"🕐 Кандидат свободен: {slots_text}\n\n"
-            f"Выбери дату и время:"
-        )
-
-        now = datetime.now()
-        keyboard = build_calendar(now.year, now.month, slot_id)
-
-        try:
-            await context.bot.send_message(MANAGER_ID, text, reply_markup=keyboard)
-            mark_slot_notified(slot_id)
-            print(f"Календарь для {name} отправлен")
-        except Exception as e:
-            print(f"Slot notify error: {e}")
-
-
 async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("start", "Главное меню"),
@@ -918,8 +696,8 @@ ALERT_GROUP_ID = -5553995946  # "HR воронка важные сообщени
 
 async def heartbeat(context):
     """Безусловная метка времени - watchdog.sh проверяет её свежесть.
-    В отличие от notify_new_videos/notify_pending_slots, которые молчат если
-    нечего слать, это единственный гарантированный признак что job_queue жив
+    В отличие от notify_new_videos, который молчит если нечего слать,
+    это единственный гарантированный признак что job_queue жив
     (именно job_queue завис в инциденте с простоем, а не сам процесс)."""
     try:
         with open(HEARTBEAT_PATH, "w") as f:
@@ -1014,7 +792,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     app.job_queue.run_repeating(notify_new_videos, interval=15, first=5)
-    app.job_queue.run_repeating(notify_pending_slots, interval=15, first=10)
     app.job_queue.run_repeating(heartbeat, interval=120, first=5)
     app.job_queue.run_repeating(daily_stats_job, interval=600, first=30)
 

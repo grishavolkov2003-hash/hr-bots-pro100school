@@ -145,27 +145,6 @@ def get_stale_candidates(hours=24):
     return result
 
 
-def create_pending_slot(candidate_user_id, candidate_name, candidate_username, slots):
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute(
-        "INSERT INTO pending_slots (candidate_user_id, candidate_name, candidate_username, slots, created_at) VALUES (?, ?, ?, ?, ?)",
-        (candidate_user_id, candidate_name, candidate_username, slots, datetime.now().isoformat())
-    )
-    conn.commit()
-    conn.close()
-
-
-def get_pending_slot():
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM pending_slots WHERE resolved = 0 ORDER BY created_at DESC LIMIT 1").fetchone()
-    conn.close()
-    if row:
-        return dict(row)
-    return None
-
-
-
 def update_conversation_bot(user_id, bot_name):
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("UPDATE candidates SET conversation_bot=? WHERE user_id=?", (bot_name, user_id))
@@ -175,12 +154,5 @@ def update_conversation_bot(user_id, bot_name):
 def update_access_hash(user_id, access_hash):
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("UPDATE candidates SET access_hash=? WHERE user_id=?", (access_hash, user_id))
-    conn.commit()
-    conn.close()
-
-
-def resolve_pending_slot(slot_id):
-    conn = sqlite3.connect(DB_PATH, timeout=10)
-    conn.execute("UPDATE pending_slots SET resolved = 1 WHERE id = ?", (slot_id,))
     conn.commit()
     conn.close()

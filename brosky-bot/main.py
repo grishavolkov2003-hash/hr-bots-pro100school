@@ -17,8 +17,7 @@ from config import (
 from storage import (
     init_db, get_candidate, create_candidate, add_message, update_conversation_bot,
     update_candidate, get_conversation, get_all_candidates,
-    get_stale_candidates, create_pending_slot, get_pending_slot,
-    resolve_pending_slot, update_access_hash,
+    get_stale_candidates, update_access_hash,
 )
 from llm import get_response, get_manager_response, get_qa_response
 from prompt import QA_SYSTEM_PROMPT
@@ -36,7 +35,6 @@ FILE_PATTERN = re.compile(r">>>\s*ОТПРАВИТЬ_ФАЙЛ:\s*(\S+)\s*<<<")
 ANKETA_PATTERN = re.compile(r">>>\s*АНКЕТА:\s*(.+?)<<<", re.DOTALL)
 STATUS_PATTERN = re.compile(r">>>\s*СТАТУС:\s*(\S+)\s*<<<")
 SCORE_PATTERN = re.compile(r">>>\s*СКОР:\s*(\d+)\s*<<<")
-SLOTS_PATTERN = re.compile(r">>>\s*СЛОТЫ:\s*(.+?)<<<", re.DOTALL)
 CREDS_PATTERN = re.compile(r"(?i)(?:логин|login)\s*[:=\-]?\s*(\S+)[\s\n]+(?:пароль|password|pass)\s*[:=\-]?\s*(\S+)")
 
 # Авто-звонок: вместо живого созвона детерминированно (без LLM) шлём этот пакет
@@ -258,27 +256,6 @@ async def send_signal(text):
         print(f"Failed to send signal: {e}")
 
 
-async def send_slots_to_manager(candidate, slots_text):
-    score = candidate.get("score", 0)
-    name = candidate.get("name", "?")
-    username = candidate.get("username", "?")
-    subject = candidate.get("subject", "?")
-
-    msg = (
-        f"🗓 НАЗНАЧЕНИЕ СОБЕСА\n"
-        f"Кандидат: {name} ({username})\n"
-        f"Предмет: {subject}\n"
-        f"Скор: {score}/10\n"
-        f"Свободен: {slots_text}\n\n"
-        f"Напиши когда тебе удобно (например \"вт 15:00\")"
-    )
-
-    create_pending_slot(
-        candidate["user_id"], name, username, slots_text
-    )
-    await send_signal(msg)
-
-
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handler(event):
     sender = await event.get_sender()
@@ -289,19 +266,6 @@ async def handler(event):
         if sender.username.lower() == "tutor_zelimhan":
             msg_text = event.message.text or ""
             if not msg_text.strip():
-                return
-
-            pending = get_pending_slot()
-            if pending:
-                resolve_pending_slot(pending["id"])
-                chosen_time = msg_text.strip()
-                cand = get_candidate(pending["candidate_user_id"])
-                if cand:
-                    confirm_msg = f"Подскажите, вам удобно созвониться {chosen_time}?"
-                    await client.send_message(pending["candidate_user_id"], confirm_msg)
-                    add_message(pending["candidate_user_id"], "bot", confirm_msg)
-                    update_candidate(pending["candidate_user_id"], status="ГОТОВ_К_СОЗВОНУ")
-                    await event.respond(f"⏳ Спросил у {pending['candidate_name']} про {chosen_time}. Жду подтверждения.")
                 return
 
             candidates = get_all_candidates()
@@ -599,6 +563,26 @@ async def _process_qa_message(user_id, username, name, chat_id):
             print(f"[qa] Signal send error: {e}", flush=True)
 
 
+async def _wait_and_reserve(user_id, max_wait_sec=30):
+    """Живым тестом (гонка двух параллельных _process_qa_message через
+    asyncio.gather) обнаружено: барьер _recently_sent сам по себе не atomic
+    - между чтением "недавно ли отвечали" и фактической записью ответа есть
+    await (_simulate_typing), и два по-настоящему одновременных запуска оба
+    успевают пройти проверку до того как любой из них запишет сообщение.
+    .cancel() в дебаунсе тоже не 100% гарантия (может не успеть до входа в
+    некэнселлируемый участок). Здесь - жёсткая сериализация по user_id:
+    ждём пока _active_responding освободится, потом бронируем СРАЗУ, без
+    await между проверкой и bronированием (одна операция set.add - атомарна
+    в пределах event loop). Возвращает True если забронировали, False если
+    так и не дождались (тогда обработку лучше пропустить, чем дублировать)."""
+    for _ in range(max_wait_sec):
+        if user_id not in _active_responding:
+            _active_responding.add(user_id)
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
 async def _process_after_delay(user_id, username, name, chat_id, delay):
     await asyncio.sleep(delay)
 
@@ -608,7 +592,8 @@ async def _process_after_delay(user_id, username, name, chat_id, delay):
         _pending_messages.pop(user_id, None)
         return
 
-    _active_responding.add(user_id)
+    if not await _wait_and_reserve(user_id):
+        return
     try:
         await _do_process(user_id, username, name, chat_id, candidate)
     finally:
@@ -627,7 +612,8 @@ async def _process_qa_after_delay(user_id, username, name, chat_id, delay):
         _pending_messages.pop(user_id, None)
         return
 
-    _active_responding.add(user_id)
+    if not await _wait_and_reserve(user_id):
+        return
     try:
         await _process_qa_message(user_id, username, name, chat_id)
     finally:
@@ -675,14 +661,12 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     anketas = ANKETA_PATTERN.findall(response)
     statuses = STATUS_PATTERN.findall(response)
     scores = SCORE_PATTERN.findall(response)
-    slots = SLOTS_PATTERN.findall(response)
 
     clean_response = SIGNAL_PATTERN.sub("", response)
     clean_response = FILE_PATTERN.sub("", clean_response)
     clean_response = ANKETA_PATTERN.sub("", clean_response)
     clean_response = STATUS_PATTERN.sub("", clean_response)
-    clean_response = SCORE_PATTERN.sub("", clean_response)
-    clean_response = SLOTS_PATTERN.sub("", clean_response).strip()
+    clean_response = SCORE_PATTERN.sub("", clean_response).strip()
 
     if clean_response and _recently_sent(user_id):
         print(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)
@@ -726,13 +710,6 @@ async def _do_process(user_id, username, name, chat_id, candidate):
         update_candidate(user_id, score=score)
         update_score(username, score)
         print(f"Скор: {name} — {score}/10")
-
-    if slots:
-        slots_text = slots[-1].strip()
-        update_candidate(user_id, slots=slots_text)
-        candidate = get_candidate(user_id)
-        await send_slots_to_manager(candidate, slots_text)
-        print(f"Слоты: {name} — {slots_text}")
 
     for signal in signals:
         signal_text = f"🔔 СИГНАЛ:\nКандидат: {name} ({username})\n{signal.strip()}"
@@ -1203,14 +1180,12 @@ async def _patrol_respond(user_id, username, name, delay):
         anketas = ANKETA_PATTERN.findall(response)
         statuses = STATUS_PATTERN.findall(response)
         scores = SCORE_PATTERN.findall(response)
-        slots = SLOTS_PATTERN.findall(response)
 
         clean_response = SIGNAL_PATTERN.sub("", response)
         clean_response = FILE_PATTERN.sub("", clean_response)
         clean_response = ANKETA_PATTERN.sub("", clean_response)
         clean_response = STATUS_PATTERN.sub("", clean_response)
-        clean_response = SCORE_PATTERN.sub("", clean_response)
-        clean_response = SLOTS_PATTERN.sub("", clean_response).strip()
+        clean_response = SCORE_PATTERN.sub("", clean_response).strip()
 
         if clean_response and _recently_sent(user_id):
             print(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)
@@ -1253,13 +1228,6 @@ async def _patrol_respond(user_id, username, name, delay):
             uname_full = f"@{username}" if username else ""
             update_score(uname_full, score)
 
-        if slots:
-            slots_text = slots[-1].strip()
-            update_candidate(user_id, slots=slots_text)
-            candidate = get_candidate(user_id)
-            await send_slots_to_manager(candidate, slots_text)
-            print(f"[patrol] Слоты: {name} — {slots_text}")
-
         for signal in signals:
             uname_full = f"@{username}" if username else ""
             signal_text = f"🔔 СИГНАЛ:\nКандидат: {name} ({uname_full})\n{signal.strip()}"
@@ -1292,49 +1260,6 @@ async def _patrol_respond(user_id, username, name, delay):
         traceback.print_exc()
     finally:
         _patrol_processing.discard(user_id)
-
-
-async def slot_confirm_loop():
-    """Проверяет pending_slots с chosen_time — отправляет кандидату подтверждение."""
-    while True:
-        await asyncio.sleep(10)
-        try:
-            conn = sqlite3.connect(DB_PATH, timeout=10)
-            conn.row_factory = sqlite3.Row
-            rows = conn.execute(
-                "SELECT * FROM pending_slots WHERE resolved = 1 AND chosen_time IS NOT NULL AND chosen_time != ''"
-            ).fetchall()
-
-            for row in rows:
-                s = dict(row)
-                user_id = s["candidate_user_id"]
-                name = s.get("candidate_name", "?")
-                username = s.get("candidate_username", "?")
-                chosen = s["chosen_time"]
-
-                candidate = get_candidate(user_id)
-                if not candidate:
-                    conn.execute("DELETE FROM pending_slots WHERE id = ?", (s["id"],))
-                    conn.commit()
-                    continue
-
-                try:
-                    msg = f"Подскажите, вам удобно созвониться {chosen}?"
-                    is_test = username and username.lower().lstrip("@") in INSTANT_USERS
-                    if not is_test:
-                        await _simulate_typing(user_id, len(msg))
-                    await client.send_message(user_id, msg)
-                    add_message(user_id, "bot", msg)
-                    print(f"[slot] Спросил {name}: удобно ли {chosen}", flush=True)
-                except Exception as e:
-                    print(f"[slot] Error sending to {name}: {e}", flush=True)
-
-                conn.execute("DELETE FROM pending_slots WHERE id = ?", (s["id"],))
-                conn.commit()
-
-            conn.close()
-        except Exception as e:
-            print(f"Slot confirm error: {e}", flush=True)
 
 
 async def sheets_sync_loop():
@@ -1409,7 +1334,6 @@ async def main():
     # (авто-звонок + подтверждение подписи договора) - hr-bot's decision_loop
     # эти записи у себя пропускает, гонка исключена фильтрами в обеих очередях
     asyncio.create_task(decision_loop())
-    # slot_confirm_loop runs only on main hr-bot to avoid double sends
     # sheets_sync_loop runs only on main hr-bot
     asyncio.create_task(_folders.folder_sync_loop(client, _folder_event))
     await client.run_until_disconnected()
