@@ -1385,6 +1385,23 @@ async def sheets_sync_loop():
         await asyncio.sleep(300)
 
 
+HEARTBEAT_PATH = "/opt/brosky-bot/heartbeat_brosky.txt"
+
+
+async def heartbeat_loop():
+    """Безусловная метка времени - по образцу manager_bot.py::heartbeat и
+    hr-bot's heartbeat_loop. watchdog.sh раньше опирался только на активность
+    в journalctl-логах - файл даёт однозначный сигнал "цикл жив" даже в тихую
+    ночь без сообщений от кандидатов."""
+    while True:
+        try:
+            with open(HEARTBEAT_PATH, "w") as f:
+                f.write(datetime.now().isoformat())
+        except Exception as e:
+            logging.error(f"Heartbeat write error: {e}")
+        await asyncio.sleep(120)
+
+
 async def main():
     logging.info("HR-бот v2 запущен. Слушаю входящие...")
     await client.start()
@@ -1399,6 +1416,7 @@ async def main():
     # (авто-звонок + подтверждение подписи договора) - hr-bot's decision_loop
     # эти записи у себя пропускает, гонка исключена фильтрами в обеих очередях
     asyncio.create_task(decision_loop())
+    asyncio.create_task(heartbeat_loop())
     # sheets_sync_loop runs only on main hr-bot
     asyncio.create_task(_folders.folder_sync_loop(client, _folder_event))
     await client.run_until_disconnected()

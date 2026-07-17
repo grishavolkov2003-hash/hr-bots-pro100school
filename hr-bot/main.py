@@ -1301,6 +1301,23 @@ async def sheets_sync_loop():
         await asyncio.sleep(300)
 
 
+HEARTBEAT_PATH = "/opt/hr-bot/heartbeat_hr.txt"
+
+
+async def heartbeat_loop():
+    """Безусловная метка времени - по образцу manager_bot.py::heartbeat.
+    watchdog.sh раньше мог опираться только на активность в journalctl-логах
+    (тихая, но живая ночь без сообщений от кандидатов выглядела так же, как
+    реально зависший процесс) - файл даёт однозначный сигнал "цикл жив"."""
+    while True:
+        try:
+            with open(HEARTBEAT_PATH, "w") as f:
+                f.write(datetime.now().isoformat())
+        except Exception as e:
+            logging.error(f"Heartbeat write error: {e}")
+        await asyncio.sleep(120)
+
+
 async def main():
     logging.info("HR-бот v2 запущен. Слушаю входящие...")
     await client.start()
@@ -1314,6 +1331,7 @@ async def main():
     asyncio.create_task(patrol_loop())
     asyncio.create_task(auto_qualified_sweep_loop())
     asyncio.create_task(sheets_sync_loop())
+    asyncio.create_task(heartbeat_loop())
     asyncio.create_task(_folders.folder_sync_loop(client, _folder_event))
     await client.run_until_disconnected()
 
