@@ -373,3 +373,36 @@ async def test_do_process_uses_fresh_status_not_stale_snapshot(make_candidate, m
         f"Гонка вернулась: LLM откатил статус до {cand['status']} поверх уже "
         f"принятого менеджером решения ПЕРЕДАН_МЕНЕДЖЕРУ"
     )
+
+
+# ── T4: FloodWaitError - один повтор вместо необработанного исключения ──
+
+@pytest.mark.asyncio
+async def test_send_message_safe_retries_once_on_flood_wait(monkeypatch):
+    """_send_message_safe должна поймать FloodWaitError, подождать e.seconds
+    и повторить ровно один раз - без обёртки это необработанное исключение
+    прямо в живом хендлере кандидата (Telethon кидает FloodWaitError на
+    любой исходящий вызов при превышении лимитов Telegram)."""
+    import main
+    from telethon.errors import FloodWaitError
+
+    calls = []
+    sleep_calls = []
+
+    async def flaky_send_message(peer, text, **kwargs):
+        calls.append((peer, text))
+        if len(calls) == 1:
+            raise FloodWaitError(request=None, capture=1)
+        return "ok"
+
+    async def fake_sleep(seconds):
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(main.client, "send_message", flaky_send_message)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    result = await main._send_message_safe(123, "тест")
+
+    assert result == "ok"
+    assert len(calls) == 2, f"Ожидали ровно 1 повтор после FloodWaitError, вызовов: {len(calls)}"
+    assert sleep_calls == [1], f"Ожидали ожидание e.seconds=1 перед повтором, получили {sleep_calls}"

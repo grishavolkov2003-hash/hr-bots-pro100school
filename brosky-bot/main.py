@@ -5,8 +5,10 @@ import re
 import os
 import io
 import sqlite3
+import logging
 from datetime import datetime, timedelta
 from telethon import TelegramClient, events
+from telethon.errors import FloodWaitError
 from telethon.tl.functions.messages import SetTypingRequest
 from telethon.tl.types import SendMessageTypingAction, SendMessageCancelAction
 from telethon.sessions import StringSession
@@ -24,11 +26,39 @@ from prompt import QA_SYSTEM_PROMPT
 import sheets as sheets_module
 from sheets import add_candidate as sheets_add, update_status, update_anketa, update_score
 
+# StreamHandler, не файл - процесс уже запущен под systemd, journald и так
+# перехватывает stdout/stderr со своей ротацией (journalctl -u brosky-bot).
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
 client = TelegramClient(
     StringSession(TELEGRAM_SESSION_STRING),
     TELEGRAM_API_ID,
     TELEGRAM_API_HASH,
 )
+
+
+async def _send_message_safe(peer, text, **kwargs):
+    """client.send_message с одной попыткой повтора при FloodWaitError -
+    Telethon кидает её на любой исходящий вызов при превышении лимитов,
+    без обработки это необработанное исключение прямо в хендлере кандидата."""
+    try:
+        return await client.send_message(peer, text, **kwargs)
+    except FloodWaitError as e:
+        logging.warning(f"FloodWait {e.seconds}с при отправке {peer}, жду и повторяю")
+        await asyncio.sleep(e.seconds)
+        return await client.send_message(peer, text, **kwargs)
+
+
+async def _send_file_safe(peer, path, **kwargs):
+    """Аналог _send_message_safe для send_file - актуально для авто-пакета
+    звонка (аудио + PDF), где сбой отправки особенно дорог."""
+    try:
+        return await client.send_file(peer, path, **kwargs)
+    except FloodWaitError as e:
+        logging.warning(f"FloodWait {e.seconds}с при отправке файла {peer}, жду и повторяю")
+        await asyncio.sleep(e.seconds)
+        return await client.send_file(peer, path, **kwargs)
+
 
 SIGNAL_PATTERN = re.compile(r">>>\s*СИГНАЛ МЕНЕДЖЕРУ:\s*(.+?)<<<", re.DOTALL)
 FILE_PATTERN = re.compile(r">>>\s*ОТПРАВИТЬ_ФАЙЛ:\s*(\S+)\s*<<<")
@@ -253,7 +283,7 @@ async def send_signal(text):
         manager = await client.get_entity(MANAGER_USERNAME)
         await client.send_message(manager, text)
     except Exception as e:
-        print(f"Failed to send signal: {e}")
+        logging.info(f"Failed to send signal: {e}")
 
 
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
@@ -304,7 +334,7 @@ async def handler(event):
             )
             conn_ins.commit()
             conn_ins.close()
-            print(f"[handler] Первый контакт от переданного Григорием: {name} ({username}) - запускаю авто-пакет", flush=True)
+            logging.info(f"[handler] Первый контакт от переданного Григорием: {name} ({username}) - запускаю авто-пакет")
         return
 
     if candidate["status"] in IGNORE_STATUSES and candidate["status"] not in QA_MODE_STATUSES:
@@ -328,7 +358,7 @@ async def handler(event):
                     text_content = data.read().decode("utf-8", errors="ignore")[:3000]
                     msg_text = f"[Содержимое резюме: {text_content}]"
             except Exception as e:
-                print(f"Doc download error: {e}")
+                logging.error(f"Doc download error: {e}")
                 msg_text = msg_text or "[Отправлен документ]"
         else:
             msg_text = msg_text or "[Отправлен файл]"
@@ -350,7 +380,7 @@ async def handler(event):
             await client.send_message(event.chat_id, FILE_RECEIVED_ACK)
         except Exception:
             pass
-        print(f"[handler] Файл получен от {name} ({username}) в ДОГОВОР_ОТПРАВЛЕН - жду ручного подтверждения подписи", flush=True)
+        logging.info(f"[handler] Файл получен от {name} ({username}) в ДОГОВОР_ОТПРАВЛЕН - жду ручного подтверждения подписи")
         return
 
     if not msg_text.strip():
@@ -379,7 +409,7 @@ async def handler(event):
             if cell:
                 ws.update_cell(cell.row, 8, "АККАУНТ_ПОЛУЧЕН")
         except Exception as e:
-            print(f"Sheets creds error: {e}")
+            logging.error(f"Sheets creds error: {e}")
         confirm = f"Отлично, {name}! Данные получил, передам коллегам для настройки аккаунта."
         try:
             await client.send_message(event.chat_id, confirm)
@@ -389,8 +419,8 @@ async def handler(event):
         try:
             await client.send_message("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({username})\nЛогин/пароль: {creds_str}")
         except Exception as e:
-            print(f"Notify mx_mish error: {e}")
-        print(f"Кредсы получены от {name}: {login} / ***")
+            logging.error(f"Notify mx_mish error: {e}")
+        logging.info(f"Кредсы получены от {name}: {login} / ***")
         return
 
     add_message(user_id, "candidate", msg_text)
@@ -406,7 +436,7 @@ async def handler(event):
             if not qualified and reasons:
                 comment += f" | Не прошёл автоотбор: {reasons}"
             update_candidate(user_id, comment=comment, auto_qualified=1 if qualified else 0)
-            print(f"Анкета (fallback-регулярка): {name} — {fallback_anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
+            logging.info(f"Анкета (fallback-регулярка): {name} — {fallback_anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
 
     # QA-режим больше НЕ обрабатывается напрямую через create_task в обход
     # дебаунса - при быстрых повторных сообщениях кандидата это порождало
@@ -540,7 +570,7 @@ async def _process_qa_message(user_id, username, name, chat_id):
 
     for marker in GARBAGE_MARKERS:
         if marker in response:
-            print(f"[qa] Filtered garbage response: {marker}", flush=True)
+            logging.warning(f"[qa] Filtered garbage response: {marker}")
             return
 
     signals = SIGNAL_PATTERN.findall(response)
@@ -548,7 +578,7 @@ async def _process_qa_message(user_id, username, name, chat_id):
 
     if clean_response:
         if _recently_sent(user_id):
-            print(f"[qa][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)
+            logging.warning(f"[qa][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
             return
         clean_response = clean_response.replace("—", "-").replace("–", "-")
         is_instant = username and username.lower().lstrip("@") in INSTANT_USERS
@@ -556,15 +586,15 @@ async def _process_qa_message(user_id, username, name, chat_id):
             await _simulate_typing(chat_id, len(clean_response))
         add_message(user_id, "bot", clean_response)
         await client.send_message(chat_id, clean_response)
-        print(f"[qa] Ответил {name}: {clean_response[:80]}...", flush=True)
+        logging.info(f"[qa] Ответил {name}: {clean_response[:80]}...")
 
     for signal in signals:
         try:
             note = f"🔔 QA-сигнал: {name} ({username}) спросил, ответа в базе нет:\n{signal.strip()}"
             await client.send_message('mx_mish', note)
-            print(f"[qa] Сигнал отправлен @mx_mish: {name}", flush=True)
+            logging.info(f"[qa] Сигнал отправлен @mx_mish: {name}")
         except Exception as e:
-            print(f"[qa] Signal send error: {e}", flush=True)
+            logging.error(f"[qa] Signal send error: {e}")
 
 
 async def _wait_and_reserve(user_id, max_wait_sec=30):
@@ -651,13 +681,13 @@ async def _do_process(user_id, username, name, chat_id, candidate):
 
     for marker in GARBAGE_MARKERS:
         if marker in response:
-            print(f"Filtered garbage response: {marker}", flush=True)
+            logging.warning(f"Filtered garbage response: {marker}")
             return
 
     clean = re.sub(r'>>>.*?<<<', '', response)
     ascii_ratio = sum(1 for c in clean if c.isascii() and c.isalpha()) / max(len(clean.strip()), 1)
     if ascii_ratio > 0.5:
-        print(f"Filtered English response (ascii_ratio={ascii_ratio:.2f})", flush=True)
+        logging.warning(f"Filtered English response (ascii_ratio={ascii_ratio:.2f})")
         return
 
     signals = SIGNAL_PATTERN.findall(response)
@@ -673,7 +703,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     clean_response = SCORE_PATTERN.sub("", clean_response).strip()
 
     if clean_response and _recently_sent(user_id):
-        print(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)
+        logging.warning(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
         clean_response = ""
 
     if clean_response:
@@ -686,7 +716,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
             await _simulate_typing(chat_id, len(clean_response))
 
         add_message(user_id, "bot", clean_response)
-        await client.send_message(chat_id, clean_response)
+        await _send_message_safe(chat_id, clean_response)
         update_conversation_bot(user_id, "brosky")
 
     for file_name in files:
@@ -707,13 +737,13 @@ async def _do_process(user_id, username, name, chat_id, candidate):
                 auto_qualified=1 if qualified else 0,
             )
             update_anketa(username, anketa)
-            print(f"Анкета: {name} — {anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
+            logging.info(f"Анкета: {name} — {anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
 
     if scores:
         score = min(int(scores[-1]), 10)
         update_candidate(user_id, score=score)
         update_score(username, score)
-        print(f"Скор: {name} — {score}/10")
+        logging.info(f"Скор: {name} — {score}/10")
 
     for signal in signals:
         signal_text = f"🔔 СИГНАЛ:\nКандидат: {name} ({username})\n{signal.strip()}"
@@ -729,7 +759,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
         # ПЕРЕДАН_МЕНЕДЖЕРУ — статус заблокирован для LLM, дальше ведёт менеджер вручную
         if llm_status in VALID_STATUSES and old_status != "ПЕРЕДАН_МЕНЕДЖЕРУ":
             new_status = llm_status
-            print(f"Статус: {name} {old_status} -> {new_status}")
+            logging.info(f"Статус: {name} {old_status} -> {new_status}")
 
     if new_status != old_status:
         update_candidate(user_id, status=new_status)
@@ -746,7 +776,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
                 )
                 conn_auto.commit()
                 conn_auto.close()
-                print(f"Автоотбор: {name} прошёл по анкете, одобрен автоматически")
+                logging.info(f"Автоотбор: {name} прошёл по анкете, одобрен автоматически")
 
 
 async def reminder_loop():
@@ -774,7 +804,7 @@ async def reminder_loop():
                         await client.send_message(user_id, msg)
                         add_message(user_id, "bot", msg)
                         update_candidate(user_id, reminder_count=2, last_reminder=datetime.now().isoformat())
-                        print(f"Напоминание 2: {name}")
+                        logging.info(f"Напоминание 2: {name}")
                     except:
                         pass
                 elif hours >= 24 and count < 1:
@@ -783,11 +813,11 @@ async def reminder_loop():
                         await client.send_message(user_id, msg)
                         add_message(user_id, "bot", msg)
                         update_candidate(user_id, reminder_count=1, last_reminder=datetime.now().isoformat())
-                        print(f"Напоминание 1: {name}")
+                        logging.info(f"Напоминание 1: {name}")
                     except:
                         pass
         except Exception as e:
-            print(f"Reminder error: {e}")
+            logging.error(f"Reminder error: {e}")
 
 
 def _apply_decision_status(user_id, username, decision):
@@ -824,12 +854,12 @@ async def _process_one_decision(d):
     ).fetchone()
     conn_race.close()
     if newer_id:
-        print(f"Decision id={d['id']} ({decision}) для uid={user_id} пропущено - есть более новое решение id={newer_id[0]}", flush=True)
+        logging.warning(f"Decision id={d['id']} ({decision}) для uid={user_id} пропущено - есть более новое решение id={newer_id[0]}")
         return
 
     candidate = get_candidate(user_id)
     if not candidate:
-        print(f"Decision skipped: candidate {user_id} not found")
+        logging.warning(f"Decision skipped: candidate {user_id} not found")
         return
 
     name = candidate.get("name", "?")
@@ -837,7 +867,7 @@ async def _process_one_decision(d):
 
     is_test_user = username and username.lower().lstrip("@") in INSTANT_USERS
     uname = username.lstrip("@") if username and username != "?" else None
-    print(f'Processing {name} (@{uname}, uid={user_id})', flush=True)
+    logging.info(f'Processing {name} (@{uname}, uid={user_id})')
     # Определяем peer: сначала access_hash (не подвержен FloodWait на ResolveUsername), потом username/uid
     peer = None
     cand_ah = candidate.get("access_hash")
@@ -851,14 +881,14 @@ async def _process_one_decision(d):
         try:
             peer = await client.get_entity(uname)
         except Exception as e:
-            print(f"Cannot resolve @{uname}: {e}", flush=True)
+            logging.warning(f"Cannot resolve @{uname}: {e}")
             _apply_decision_status(user_id, username, decision)
             return
     if peer is None:
         try:
             peer = await client.get_entity(user_id)
         except Exception as e:
-            print(f"Cannot resolve uid {user_id}: {e}", flush=True)
+            logging.warning(f"Cannot resolve uid {user_id}: {e}")
             _apply_decision_status(user_id, username, decision)
             return
     peer_id = peer.id
@@ -869,7 +899,7 @@ async def _process_one_decision(d):
             msg1 = f"{name}, посмотрел вашу визитку - реально понравилось. Видно что вы увлечены предметом и умеете подать себя. Именно такой подход мы и ищем."
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg1))
-            await client.send_message(peer, msg1)
+            await _send_message_safe(peer, msg1)
             add_message(user_id, "bot", msg1)
             await asyncio.sleep(random.uniform(3, 8) if not is_test_user else 1)
 
@@ -890,20 +920,20 @@ async def _process_one_decision(d):
             )
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg2))
-            await client.send_message(peer, msg2)
+            await _send_message_safe(peer, msg2)
             add_message(user_id, "bot", msg2)
             await asyncio.sleep(random.uniform(3, 8) if not is_test_user else 1)
 
             # Авто-звонок вместо живого созвона - 4 сообщения подряд (см. константы вверху файла)
             if not is_test_user:
                 await _simulate_typing(peer_id, len(AUTO_CALL_TEXT_1))
-            await client.send_message(peer, AUTO_CALL_TEXT_1)
+            await _send_message_safe(peer, AUTO_CALL_TEXT_1)
             add_message(user_id, "bot", AUTO_CALL_TEXT_1)
             await asyncio.sleep(random.uniform(2, 4) if not is_test_user else 1)
 
             if not is_test_user:
                 await _simulate_typing(peer_id, len(AUTO_CALL_TEXT_2))
-            await client.send_message(peer, AUTO_CALL_TEXT_2)
+            await _send_message_safe(peer, AUTO_CALL_TEXT_2)
             add_message(user_id, "bot", AUTO_CALL_TEXT_2)
             await asyncio.sleep(random.uniform(2, 4) if not is_test_user else 1)
 
@@ -912,23 +942,23 @@ async def _process_one_decision(d):
             # (найдено ревью 17.07). Файл может пропасть/не выложиться при деплое -
             # это не гипотетика, ассеты разворачиваются на сервере вручную.
             if not os.path.exists(AUTO_CALL_AUDIO_PATH):
-                print(f"[decision] Аудио-файл авто-звонка не найден: {AUTO_CALL_AUDIO_PATH}", flush=True)
+                logging.info(f"[decision] Аудио-файл авто-звонка не найден: {AUTO_CALL_AUDIO_PATH}")
                 await send_signal(f"⚠️ Не найден файл авто-звонка (аудио) для {name} ({username}). Каскад прерван до отправки файлов, статус НЕ менялся - проверьте вручную.")
                 return
-            await client.send_file(peer, AUTO_CALL_AUDIO_PATH, voice_note=True)
+            await _send_file_safe(peer, AUTO_CALL_AUDIO_PATH, voice_note=True)
             add_message(user_id, "bot", "[отправлено голосовое: деловое предложение]")
             await asyncio.sleep(random.uniform(2, 4) if not is_test_user else 1)
 
             if not os.path.exists(AUTO_CALL_CONTRACT_PATH):
-                print(f"[decision] PDF договора не найден: {AUTO_CALL_CONTRACT_PATH}", flush=True)
+                logging.info(f"[decision] PDF договора не найден: {AUTO_CALL_CONTRACT_PATH}")
                 await send_signal(f"⚠️ Не найден файл договора (PDF) для {name} ({username}). Аудио уже отправлено, договор - нет, статус НЕ менялся - проверьте вручную.")
                 return
-            await client.send_file(peer, AUTO_CALL_CONTRACT_PATH)
+            await _send_file_safe(peer, AUTO_CALL_CONTRACT_PATH)
             add_message(user_id, "bot", "[отправлен файл: договор партнёрский.pdf]")
 
             update_candidate(user_id, status="ДОГОВОР_ОТПРАВЛЕН")
             update_status(username, "ДОГОВОР_ОТПРАВЛЕН", "Авто-пакет (звонок+договор) отправлен")
-            print(f"Одобрен: {name} - авто-пакет отправлен, статус ДОГОВОР_ОТПРАВЛЕН")
+            logging.info(f"Одобрен: {name} - авто-пакет отправлен, статус ДОГОВОР_ОТПРАВЛЕН")
 
         elif decision == "rejected":
             reason_comment = (candidate.get("comment") or "").lower()
@@ -943,21 +973,21 @@ async def _process_one_decision(d):
             msg = f"{name}, спасибо что уделили время. К сожалению, на данном этапе не подходим друг другу - {reason_txt}. Удачи вам!"
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg))
-            await client.send_message(peer, msg)
+            await _send_message_safe(peer, msg)
             add_message(user_id, "bot", msg)
             update_candidate(user_id, status="ОТКАЗ")
             update_status(username, "ОТКАЗ")
-            print(f"Отказ: {name}")
+            logging.info(f"Отказ: {name}")
 
         elif decision == "contract_signed":
             if not is_test_user:
                 await _simulate_typing(peer_id, len(AFTER_SIGNED_TEXT))
-            await client.send_message(peer, AFTER_SIGNED_TEXT)
+            await _send_message_safe(peer, AFTER_SIGNED_TEXT)
             add_message(user_id, "bot", AFTER_SIGNED_TEXT)
-            print(f"Договор подписан подтверждён: {name} - сообщение про фото/диплом отправлено")
+            logging.info(f"Договор подписан подтверждён: {name} - сообщение про фото/диплом отправлено")
 
     except Exception as e:
-        print(f"Decision send error for {name}: {e}", flush=True)
+        logging.error(f"Decision send error for {name}: {e}")
         try:
             await send_signal(f"⚠️ Ошибка при обработке решения по {name} ({username}): {e}. Проверьте вручную, что реально дошло до кандидата.")
         except Exception:
@@ -1016,7 +1046,7 @@ async def decision_loop():
                 try:
                     await asyncio.wait_for(_process_one_decision(d), timeout=DECISION_TIMEOUT_SEC)
                 except asyncio.TimeoutError:
-                    print(f"Decision TIMEOUT id={d['id']} uid={d.get('candidate_user_id')} - статус НЕ меняю, шлю алерт менеджеру", flush=True)
+                    logging.warning(f"Decision TIMEOUT id={d['id']} uid={d.get('candidate_user_id')} - статус НЕ меняю, шлю алерт менеджеру")
                     candidate = get_candidate(d["candidate_user_id"])
                     cand_name = candidate.get("name", "?") if candidate else "?"
                     await send_signal(
@@ -1027,7 +1057,7 @@ async def decision_loop():
                         f"Статус НЕ менял, проверьте вручную переписку с кандидатом."
                     )
                 except Exception as e:
-                    print(f"Decision processing error id={d['id']}: {e}", flush=True)
+                    logging.error(f"Decision processing error id={d['id']}: {e}")
                 finally:
                     try:
                         os.remove(busy_path)
@@ -1040,7 +1070,7 @@ async def decision_loop():
                 conn2.close()
 
         except Exception as e:
-            print(f"Decision loop error: {e}")
+            logging.error(f"Decision loop error: {e}")
 
 
 ACTIVE_STATUSES = {
@@ -1157,7 +1187,7 @@ async def patrol_loop():
                         add_message(user_id, "candidate", t)
                     update_candidate(user_id, reminder_count=0)
 
-                    print(f"[patrol] Найдено {len(new_texts)} новых от {name} (@{username})", flush=True)
+                    logging.info(f"[patrol] Найдено {len(new_texts)} новых от {name} (@{username})")
 
                     is_instant = username and username.lower() in INSTANT_USERS
                     delay = 3 if is_instant else random.randint(20, 60)
@@ -1168,7 +1198,7 @@ async def patrol_loop():
                         _patrol_processing.discard(user_id)
 
         except Exception as e:
-            print(f"Patrol error: {e}", flush=True)
+            logging.error(f"Patrol error: {e}")
 
         await asyncio.sleep(300)
 
@@ -1201,12 +1231,12 @@ async def _patrol_respond(user_id, username, name, delay):
 
         for marker in GARBAGE_MARKERS:
             if marker in response:
-                print(f"[patrol] Filtered garbage for {name}: {marker}", flush=True)
+                logging.warning(f"[patrol] Filtered garbage for {name}: {marker}")
                 return
         clean = re.sub(r'>>>.*?<<<', '', response)
         ascii_ratio = sum(1 for c in clean if c.isascii() and c.isalpha()) / max(len(clean.strip()), 1)
         if ascii_ratio > 0.5:
-            print(f"[patrol] Filtered English response for {name} (ascii_ratio={ascii_ratio:.2f})", flush=True)
+            logging.warning(f"[patrol] Filtered English response for {name} (ascii_ratio={ascii_ratio:.2f})")
             return
 
         signals = SIGNAL_PATTERN.findall(response)
@@ -1222,7 +1252,7 @@ async def _patrol_respond(user_id, username, name, delay):
         clean_response = SCORE_PATTERN.sub("", clean_response).strip()
 
         if clean_response and _recently_sent(user_id):
-            print(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек", flush=True)
+            logging.warning(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
             clean_response = ""
 
         if clean_response:
@@ -1231,9 +1261,9 @@ async def _patrol_respond(user_id, username, name, delay):
             if not is_instant:
                 await _simulate_typing(user_id, len(clean_response))
             add_message(user_id, "bot", clean_response)
-            await client.send_message(user_id, clean_response)
+            await _send_message_safe(user_id, clean_response)
             update_conversation_bot(user_id, "brosky")
-            print(f"[patrol] Ответил {name}: {clean_response[:80]}...", flush=True)
+            logging.info(f"[patrol] Ответил {name}: {clean_response[:80]}...")
 
         for file_name in files:
             path = os.path.join(os.path.dirname(__file__) or ".", file_name.strip())
@@ -1254,7 +1284,7 @@ async def _patrol_respond(user_id, username, name, delay):
                 )
                 uname_full = f"@{username}" if username else ""
                 update_anketa(uname_full, anketa)
-                print(f"[patrol] Анкета: {name} — {anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
+                logging.info(f"[patrol] Анкета: {name} — {anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
 
         if scores:
             score = min(int(scores[-1]), 10)
@@ -1275,7 +1305,7 @@ async def _patrol_respond(user_id, username, name, delay):
                 update_candidate(user_id, status=llm_status)
                 uname_full = f"@{username}" if username else ""
                 update_status(uname_full, llm_status)
-                print(f"[patrol] Статус: {name} {old_status} -> {llm_status}")
+                logging.info(f"[patrol] Статус: {name} {old_status} -> {llm_status}")
 
                 if llm_status == "ТЕСТОВОЕ_НА_ПРОВЕРКЕ":
                     fresh = get_candidate(user_id)
@@ -1287,11 +1317,11 @@ async def _patrol_respond(user_id, username, name, delay):
                         )
                         conn_auto.commit()
                         conn_auto.close()
-                        print(f"[patrol] Автоотбор: {name} прошёл по анкете, одобрен автоматически")
+                        logging.info(f"[patrol] Автоотбор: {name} прошёл по анкете, одобрен автоматически")
 
     except Exception as e:
         import traceback
-        print(f"[patrol] Error responding to {name}: {e}", flush=True)
+        logging.error(f"[patrol] Error responding to {name}: {e}")
         traceback.print_exc()
     finally:
         _patrol_processing.discard(user_id)
@@ -1341,28 +1371,28 @@ async def sheets_sync_loop():
 
             if updates:
                 ws.batch_update(updates)
-                print(f"[sheets] Synced {len(updates)} cells", flush=True)
+                logging.info(f"[sheets] Synced {len(updates)} cells")
 
             try:
                 from sheets import sync_kanban
                 sync_kanban(all_candidates)
             except Exception as e:
-                print(f"[sheets] Kanban error: {e}", flush=True)
+                logging.error(f"[sheets] Kanban error: {e}")
 
         except Exception as e:
-            print(f"[sheets] Sync error: {e}", flush=True)
+            logging.error(f"[sheets] Sync error: {e}")
 
         await asyncio.sleep(300)
 
 
 async def main():
-    print("HR-бот v2 запущен. Слушаю входящие...")
+    logging.info("HR-бот v2 запущен. Слушаю входящие...")
     await client.start()
     try:
         dialogs = await client.get_dialogs(limit=300)
-        print(f"Loaded {len(dialogs)} dialogs into entity cache", flush=True)
+        logging.info(f"Loaded {len(dialogs)} dialogs into entity cache")
     except Exception as e:
-        print(f"Failed to preload dialogs: {e}", flush=True)
+        logging.info(f"Failed to preload dialogs: {e}")
     # reminder_loop runs only on main hr-bot to avoid double reminders
     asyncio.create_task(patrol_loop())
     # decision_loop здесь обрабатывает ТОЛЬКО conversation_bot='brosky' кандидатов
