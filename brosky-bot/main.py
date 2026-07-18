@@ -281,7 +281,7 @@ def parse_anketa_fallback(text):
 async def send_signal(text):
     try:
         manager = await client.get_entity(MANAGER_USERNAME)
-        await client.send_message(manager, text)
+        await _send_message_safe(manager, text)
     except Exception as e:
         logging.info(f"Failed to send signal: {e}")
 
@@ -377,9 +377,9 @@ async def handler(event):
         add_message(user_id, "candidate", msg_text)
         add_message(user_id, "bot", FILE_RECEIVED_ACK)
         try:
-            await client.send_message(event.chat_id, FILE_RECEIVED_ACK)
-        except Exception:
-            pass
+            await _send_message_safe(event.chat_id, FILE_RECEIVED_ACK)
+        except Exception as e:
+            logging.warning(f"[handler] File-received-ack send error for {name}: {e}")
         logging.info(f"[handler] Файл получен от {name} ({username}) в ДОГОВОР_ОТПРАВЛЕН - жду ручного подтверждения подписи")
         return
 
@@ -412,12 +412,12 @@ async def handler(event):
             logging.error(f"Sheets creds error: {e}")
         confirm = f"Отлично, {name}! Данные получил, передам коллегам для настройки аккаунта."
         try:
-            await client.send_message(event.chat_id, confirm)
+            await _send_message_safe(event.chat_id, confirm)
             add_message(user_id, "bot", confirm)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Creds confirm send error for {name}: {e}")
         try:
-            await client.send_message("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({username})\nЛогин/пароль: {creds_str}")
+            await _send_message_safe("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({username})\nЛогин/пароль: {creds_str}")
         except Exception as e:
             logging.error(f"Notify mx_mish error: {e}")
         logging.info(f"Кредсы получены от {name}: {login} / ***")
@@ -585,13 +585,19 @@ async def _process_qa_message(user_id, username, name, chat_id):
         if not is_instant:
             await _simulate_typing(chat_id, len(clean_response))
         add_message(user_id, "bot", clean_response)
-        await client.send_message(chat_id, clean_response)
-        logging.info(f"[qa] Ответил {name}: {clean_response[:80]}...")
+        # РЕГРЕССИЯ (найдена ревью): единственный QA-каскад без FloodWait-защиты
+        # И без единого try/except - необработанное исключение улетало из
+        # asyncio-таски молча, кандидат оставался без ответа, никто не узнавал.
+        try:
+            await _send_message_safe(chat_id, clean_response)
+            logging.info(f"[qa] Ответил {name}: {clean_response[:80]}...")
+        except Exception as e:
+            logging.error(f"[qa] Response send error for {name}: {e}")
 
     for signal in signals:
         try:
             note = f"🔔 QA-сигнал: {name} ({username}) спросил, ответа в базе нет:\n{signal.strip()}"
-            await client.send_message('mx_mish', note)
+            await _send_message_safe('mx_mish', note)
             logging.info(f"[qa] Сигнал отправлен @mx_mish: {name}")
         except Exception as e:
             logging.error(f"[qa] Signal send error: {e}")
@@ -722,7 +728,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     for file_name in files:
         path = os.path.join(os.path.dirname(__file__) or ".", file_name.strip())
         if os.path.exists(path):
-            await client.send_file(chat_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
+            await _send_file_safe(chat_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
 
     for anketa_raw in anketas:
         anketa = parse_anketa(anketa_raw)
@@ -801,21 +807,21 @@ async def reminder_loop():
                 elif hours >= 48 and count < 2:
                     msg = f"{name}, напоминаю про задания для отбора. Когда планируете выполнить?"
                     try:
-                        await client.send_message(user_id, msg)
+                        await _send_message_safe(user_id, msg)
                         add_message(user_id, "bot", msg)
                         update_candidate(user_id, reminder_count=2, last_reminder=datetime.now().isoformat())
                         logging.info(f"Напоминание 2: {name}")
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Reminder 2 send error for {name}: {e}")
                 elif hours >= 24 and count < 1:
                     msg = f"{name}, как дела с заданиями? Если есть вопросы — пишите, помогу."
                     try:
-                        await client.send_message(user_id, msg)
+                        await _send_message_safe(user_id, msg)
                         add_message(user_id, "bot", msg)
                         update_candidate(user_id, reminder_count=1, last_reminder=datetime.now().isoformat())
                         logging.info(f"Напоминание 1: {name}")
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Reminder 1 send error for {name}: {e}")
         except Exception as e:
             logging.error(f"Reminder error: {e}")
 
@@ -1206,7 +1212,7 @@ async def patrol_loop():
                             except Exception as e:
                                 logging.error(f"[patrol] Sheets creds error: {e}")
                             try:
-                                confirm = "Отлично! Данные получил, передам коллегам для настройки аккаунта."
+                                confirm = f"Отлично, {name}! Данные получил, передам коллегам для настройки аккаунта."
                                 await _send_message_safe(user_id, confirm)
                                 add_message(user_id, "bot", confirm)
                             except Exception:
@@ -1305,7 +1311,7 @@ async def _patrol_respond(user_id, username, name, delay):
         for file_name in files:
             path = os.path.join(os.path.dirname(__file__) or ".", file_name.strip())
             if os.path.exists(path):
-                await client.send_file(user_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
+                await _send_file_safe(user_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
 
         for anketa_raw in anketas:
             anketa = parse_anketa(anketa_raw)
@@ -1357,9 +1363,7 @@ async def _patrol_respond(user_id, username, name, delay):
                         logging.info(f"[patrol] Автоотбор: {name} прошёл по анкете, одобрен автоматически")
 
     except Exception as e:
-        import traceback
-        logging.error(f"[patrol] Error responding to {name}: {e}")
-        traceback.print_exc()
+        logging.error(f"[patrol] Error responding to {name}: {e}", exc_info=True)
     finally:
         _patrol_processing.discard(user_id)
 

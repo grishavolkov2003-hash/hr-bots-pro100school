@@ -2,6 +2,7 @@ import gspread
 from google.oauth2.credentials import Credentials
 import json
 import os
+import logging
 from datetime import datetime
 from config import GOOGLE_SHEETS_CREDS
 
@@ -20,7 +21,7 @@ def _get_sheet():
 
     creds_path = GOOGLE_SHEETS_CREDS
     if not os.path.exists(creds_path):
-        print(f"Google creds not found: {creds_path}")
+        logging.warning(f"Google creds not found: {creds_path}")
         return None
 
     with open(creds_path) as f:
@@ -40,7 +41,7 @@ def _get_sheet():
         try:
             creds.refresh(Request())
         except Exception as e:
-            print(f"Google Sheets creds refresh error: {e}")
+            logging.error(f"Google Sheets creds refresh error: {e}")
             return None
 
     gc = gspread.authorize(creds)
@@ -57,9 +58,9 @@ def _get_sheet():
                 values=[["Дата", "Имя", "Username", "Предмет", "Источник", "Учеников", "Аккаунт Профи", "Статус", "Последнее действие", "Комментарий", "Скор"]],
             )
             ws.format("A1:J1", {"textFormat": {"bold": True}})
-            print(f"Created sheet: {sh.url}")
+            logging.info(f"Created sheet: {sh.url}")
     except Exception as e:
-        print(f"Google Sheets open/create error: {e}")
+        logging.error(f"Google Sheets open/create error: {e}")
         return None
 
     _sheet = sh
@@ -91,7 +92,7 @@ def add_candidate(candidate):
             candidate.get("comment", ""),
         ])
     except Exception as e:
-        print(f"Sheets add_candidate error: {e}")
+        logging.error(f"Sheets add_candidate error: {e}")
 
 
 def update_status(username, status, comment=""):
@@ -107,7 +108,7 @@ def update_status(username, status, comment=""):
             if comment:
                 ws.update_cell(cell.row, 10, comment)
     except Exception as e:
-        print(f"Sheets update error: {e}")
+        logging.error(f"Sheets update error: {e}")
 
 
 def update_anketa(username, anketa):
@@ -127,7 +128,7 @@ def update_anketa(username, anketa):
             ws.update_cell(row, 10, comment)
             ws.update_cell(row, 9, datetime.now().strftime("%Y-%m-%d %H:%M"))
     except Exception as e:
-        print(f"Sheets anketa error: {e}")
+        logging.error(f"Sheets anketa error: {e}")
 
 
 def update_score(username, score):
@@ -140,7 +141,7 @@ def update_score(username, score):
         if cell:
             ws.update_cell(cell.row, 11, str(score))
     except Exception as e:
-        print(f"Sheets score error: {e}")
+        logging.error(f"Sheets score error: {e}")
 
 
 KANBAN_STATUSES = [
@@ -233,7 +234,7 @@ def sync_kanban(all_candidates):
 
     _sync_chart(sh, ws, chart_row, len(KANBAN_STATUSES))
 
-    print(f"[sheets] Kanban synced: {sum(len(v) for v in by_status.values())} candidates", flush=True)
+    logging.info(f"[sheets] Kanban synced: {sum(len(v) for v in by_status.values())} candidates")
 
 
 def _sync_chart(spreadsheet, worksheet, chart_row, num_cols):
@@ -417,4 +418,4 @@ def sync_dashboard(all_candidates):
     funnel_end = 3 + len(FUNNEL_ORDER) + 1
     ws.format(f"A{funnel_end+2}:D{funnel_end+2}", {"textFormat": {"bold": True}, "backgroundColor": {"red": 0.85, "green": 1.0, "blue": 0.85}})
 
-    print(f"[sheets] Dashboard synced: {total} candidates", flush=True)
+    logging.info(f"[sheets] Dashboard synced: {total} candidates")

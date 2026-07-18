@@ -1,6 +1,7 @@
 import anthropic
 import json
 import re
+import logging
 from config import ANTHROPIC_API_KEY
 from prompt import SYSTEM_PROMPT
 import os
@@ -135,11 +136,11 @@ def get_response(conversation, candidate_info):
             # Ответ обрублен на середине (не хватило токенов на видимый текст,
             # например из-за длинного скрытого reasoning) - лучше не слать
             # кандидату обрывок фразы, чем отправить битое сообщение.
-            print(f"LLM truncated (max_tokens hit), пропускаем ответ")
+            logging.info(f"LLM truncated (max_tokens hit), пропускаем ответ")
             return None
         return _strip_thinking(response.content[0].text)
     except Exception as e:
-        print(f"LLM error: {e}")
+        logging.error(f"LLM error: {e}")
         return None
 
 
@@ -153,11 +154,11 @@ def get_qa_response(conversation, candidate_info, qa_system_prompt):
             messages=messages,
         )
         if response.stop_reason in ("max_tokens", "length"):
-            print(f"QA LLM truncated (max_tokens hit), пропускаем ответ")
+            logging.info(f"QA LLM truncated (max_tokens hit), пропускаем ответ")
             return None
         return _strip_thinking(response.content[0].text)
     except Exception as e:
-        print(f"QA LLM error: {e}")
+        logging.error(f"QA LLM error: {e}")
         return None
 
 
@@ -213,5 +214,5 @@ def get_manager_response(question, all_candidates):
         )
         return _strip_thinking(response.content[0].text)
     except Exception as e:
-        print(f"Manager LLM error: {e}")
+        logging.error(f"Manager LLM error: {e}")
         return None

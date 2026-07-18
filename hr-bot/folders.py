@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+import logging
 
 from telethon.tl.functions.messages import UpdateDialogFilterRequest
 from telethon.tl.types import DialogFilter, InputPeerUser, TextWithEntities
@@ -89,7 +90,7 @@ async def _update_folder(client, fid, title_str, peers):
                 good.append(p)
             except Exception:
                 uid = getattr(p, 'user_id', '?')
-                print(f"[folders] Пропускаем пира uid={uid} в '{title_str}'", flush=True)
+                logging.info(f"[folders] Пропускаем пира uid={uid} в '{title_str}'")
             await asyncio.sleep(0.1)
         if good:
             await client(UpdateDialogFilterRequest(id=fid, filter=_make_filter(fid, title_str, good)))
@@ -110,18 +111,18 @@ async def sync_all_folders(client):
             peers = await _resolve_peers(client, folder_candidates[fid])
 
             if not peers:
-                print(f"[folders] '{title_str}': пусто или нет entity, пропускаем", flush=True)
+                logging.info(f"[folders] '{title_str}': пусто или нет entity, пропускаем")
                 continue
 
             count = await _update_folder(client, fid, title_str, peers)
-            print(f"[folders] '{title_str}': {count}/{len(peers)} чат(ов)", flush=True)
+            logging.info(f"[folders] '{title_str}': {count}/{len(peers)} чат(ов)")
 
         except Exception as e:
-            print(f"[folders] Ошибка '{title_str}': {e}", flush=True)
+            logging.info(f"[folders] Ошибка '{title_str}': {e}")
 
         await asyncio.sleep(0.3)
 
-    print("[folders] Синк завершён", flush=True)
+    logging.info("[folders] Синк завершён")
 
 
 def trigger_sync(event: asyncio.Event):
@@ -130,11 +131,11 @@ def trigger_sync(event: asyncio.Event):
 
 async def folder_sync_loop(client, event: asyncio.Event, periodic_sec=300):
     await asyncio.sleep(40)
-    print("[folders] Начальный синк...", flush=True)
+    logging.info("[folders] Начальный синк...")
     try:
         await sync_all_folders(client)
     except Exception as e:
-        print(f"[folders] Начальный синк ошибка: {e}", flush=True)
+        logging.error(f"[folders] Начальный синк ошибка: {e}")
 
     while True:
         try:
@@ -146,4 +147,4 @@ async def folder_sync_loop(client, event: asyncio.Event, periodic_sec=300):
         try:
             await sync_all_folders(client)
         except Exception as e:
-            print(f"[folders] Синк ошибка: {e}", flush=True)
+            logging.error(f"[folders] Синк ошибка: {e}")

