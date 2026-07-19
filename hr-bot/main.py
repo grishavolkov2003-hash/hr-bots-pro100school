@@ -312,7 +312,17 @@ async def handler(event):
     elif event.message.document:
         doc = event.message.document
         mime = doc.mime_type or ""
-        if "pdf" in mime or "word" in mime or "document" in mime:
+        if mime.startswith("video/"):
+            # Видео, отправленное как файл (а не нативным video-сообщением) -
+            # частый случай для больших файлов или "Отправить как документ" -
+            # раньше падало в общий "[Отправлен файл]" без смены статуса,
+            # кандидат реально прислал видеовизитку, а система об этом не знала
+            # и продолжала слать напоминания "пришлите видео" бесконечно.
+            msg_text = "[Отправлено медиа: видео/голосовое]"
+            if candidate["status"] in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
+                update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
+                update_status(username, "ТЕСТОВОЕ_ПОЛУЧЕНО")
+        elif "pdf" in mime or "word" in mime or "document" in mime:
             try:
                 data = await client.download_media(event.message, file=io.BytesIO())
                 if data:
@@ -1039,7 +1049,10 @@ async def patrol_loop():
                         if last_msg.video or last_msg.video_note or last_msg.voice:
                             last_text = "[Отправлено медиа: видео/голосовое]"
                         elif last_msg.document:
-                            last_text = "[Отправлен документ]"
+                            if (last_msg.document.mime_type or "").startswith("video/"):
+                                last_text = "[Отправлено медиа: видео/голосовое]"
+                            else:
+                                last_text = "[Отправлен документ]"
                         elif last_msg.photo:
                             last_text = "[Отправлено фото]"
                         else:
@@ -1060,10 +1073,16 @@ async def patrol_loop():
                             if m.video or m.video_note or m.voice:
                                 t = "[Отправлено медиа: видео/голосовое]"
                                 if c.get("status") in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
-                                    update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО")
+                                    update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
                                     update_status(c.get("username", ""), "ТЕСТОВОЕ_ПОЛУЧЕНО")
                             elif m.document:
-                                t = "[Отправлен документ]"
+                                if (m.document.mime_type or "").startswith("video/"):
+                                    t = "[Отправлено медиа: видео/голосовое]"
+                                    if c.get("status") in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
+                                        update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
+                                        update_status(c.get("username", ""), "ТЕСТОВОЕ_ПОЛУЧЕНО")
+                                else:
+                                    t = "[Отправлен документ]"
                             elif m.photo:
                                 t = "[Отправлено фото]"
                             else:
