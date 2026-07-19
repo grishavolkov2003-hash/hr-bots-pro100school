@@ -811,7 +811,7 @@ async def _process_one_decision(d):
                 await asyncio.sleep(1)
 
             # Все одобренные автоматически передаются Броски - у Зелимхана не задерживаются
-            msg3 = "Для обсуждения деталей и назначения созвона свяжитесь с моим коллегой - @brosky_manage. Он всё расскажет подробнее."
+            msg3 = "Для обсуждения деталей свяжитесь с моим коллегой - @brosky_manage. Он вышлет материалы и ответит на вопросы."
             if not is_test_user:
                 await _simulate_typing(peer_id, len(msg3))
             await _send_message_safe(peer, msg3)
