@@ -694,7 +694,11 @@ async def reminder_loop():
                     msg = f"{name}, напоминаю про задания для отбора. Когда планируете выполнить?"
                     try:
                         await _send_message_safe(user_id, msg)
-                        add_message(user_id, "bot", msg)
+                        # Помечаем в истории как авто-напоминание (не в тексте, который
+                        # реально ушёл кандидату) - иначе LLM видит этот шаблонный текст
+                        # среди "своих" прошлых реплик и начинает его копировать/повторять
+                        # в новых ответах, приклеивая к контекстным ответам не по делу.
+                        add_message(user_id, "bot", f"[авто-напоминание системы, не твои слова] {msg}")
                         update_candidate(user_id, reminder_count=2, last_reminder=datetime.now().isoformat())
                         logging.info(f"Напоминание 2: {name}")
                     except Exception as e:
@@ -706,7 +710,7 @@ async def reminder_loop():
                     msg = f"{name}, как дела с заданиями? Если есть вопросы — пишите, помогу."
                     try:
                         await _send_message_safe(user_id, msg)
-                        add_message(user_id, "bot", msg)
+                        add_message(user_id, "bot", f"[авто-напоминание системы, не твои слова] {msg}")
                         update_candidate(user_id, reminder_count=1, last_reminder=datetime.now().isoformat())
                         logging.info(f"Напоминание 1: {name}")
                     except Exception as e:
