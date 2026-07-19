@@ -62,11 +62,17 @@ async def _send_file_safe(peer, path, **kwargs):
         return await client.send_file(peer, path, **kwargs)
 
 
-SIGNAL_PATTERN = re.compile(r">>>\s*СИГНАЛ МЕНЕДЖЕРУ:\s*(.+?)<<<", re.DOTALL)
-FILE_PATTERN = re.compile(r">>>\s*ОТПРАВИТЬ_ФАЙЛ:\s*(\S+)\s*<<<")
-ANKETA_PATTERN = re.compile(r">>>\s*АНКЕТА:\s*(.+?)<<<", re.DOTALL)
-STATUS_PATTERN = re.compile(r">>>\s*СТАТУС:\s*(\S+)\s*<<<")
-SCORE_PATTERN = re.compile(r">>>\s*СКОР:\s*(\d+)\s*<<<")
+
+# Толерантные к недописанным разделителям паттерны - живые логи показали, что
+# модель регулярно (~50 случаев за 3 недели) недописывает >>> / <<< (то 2
+# символа вместо 3, то вообще без закрывающих), из-за чего сырой тег утекал
+# прямо в чат кандидату. Разделители теперь не обязательны (0-4 символа),
+# граница тега - конец строки, а не обязательный "<<<".
+SIGNAL_PATTERN = re.compile(r"^\s*>{0,4}\s*СИГНАЛ МЕНЕД?ЖЕРУ:\s*(.+?)\s*(?:<{2,4}\s*)?$", re.MULTILINE)
+FILE_PATTERN = re.compile(r"^\s*>{0,4}\s*ОТПРАВИТЬ_ФАЙЛ:\s*(\S+)\s*(?:<{2,4})?\s*$", re.MULTILINE)
+ANKETA_PATTERN = re.compile(r"^\s*>{0,4}\s*АНКЕТА:\s*(.+?)\s*(?:<{2,4}\s*)?$", re.MULTILINE)
+STATUS_PATTERN = re.compile(r"^\s*>{0,4}\s*СТАТУС:\s*(\S+?)\s*(?:<{2,4})?\s*$", re.MULTILINE)
+SCORE_PATTERN = re.compile(r"^\s*>{0,4}\s*СКОР:\s*(\d+)\s*(?:<{2,4})?\s*$", re.MULTILINE)
 CREDS_PATTERN = re.compile(r"(?i)(?:логин|login)\s*[:=\-]?\s*(\S+)[\s\n]+(?:пароль|password|pass)\s*[:=\-]?\s*(\S+)")
 
 VALID_STATUSES = {
@@ -536,7 +542,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
             logging.warning(f"Filtered garbage response: {marker}")
             return
 
-    clean = re.sub(r'>>>.*?<<<', '', response)
+    clean = re.sub(r'>{0,4}\s*(?:СИГНАЛ МЕНЕД?ЖЕРУ|ОТПРАВИТЬ_ФАЙЛ|АНКЕТА|СТАТУС|СКОР):[^\n]*', '', response)
     ascii_ratio = sum(1 for c in clean if c.isascii() and c.isalpha()) / max(len(clean.strip()), 1)
     if ascii_ratio > 0.5:
         logging.warning(f"Filtered English response (ascii_ratio={ascii_ratio:.2f})")
@@ -552,7 +558,8 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     clean_response = FILE_PATTERN.sub("", clean_response)
     clean_response = ANKETA_PATTERN.sub("", clean_response)
     clean_response = STATUS_PATTERN.sub("", clean_response)
-    clean_response = SCORE_PATTERN.sub("", clean_response).strip()
+    clean_response = SCORE_PATTERN.sub("", clean_response)
+    clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
     if clean_response and _recently_sent(user_id):
         logging.warning(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
@@ -1152,7 +1159,7 @@ async def _patrol_respond(user_id, username, name, delay):
                 logging.warning(f"[patrol] Filtered garbage for {name}: {marker}")
                 return
 
-        clean = re.sub(r'>>>.*?<<<', '', response)
+        clean = re.sub(r'>{0,4}\s*(?:СИГНАЛ МЕНЕД?ЖЕРУ|ОТПРАВИТЬ_ФАЙЛ|АНКЕТА|СТАТУС|СКОР):[^\n]*', '', response)
         ascii_ratio = sum(1 for c in clean if c.isascii() and c.isalpha()) / max(len(clean.strip()), 1)
         if ascii_ratio > 0.5:
             logging.warning(f"[patrol] Filtered English response for {name} (ascii_ratio={ascii_ratio:.2f})")
@@ -1168,7 +1175,8 @@ async def _patrol_respond(user_id, username, name, delay):
         clean_response = FILE_PATTERN.sub("", clean_response)
         clean_response = ANKETA_PATTERN.sub("", clean_response)
         clean_response = STATUS_PATTERN.sub("", clean_response)
-        clean_response = SCORE_PATTERN.sub("", clean_response).strip()
+        clean_response = SCORE_PATTERN.sub("", clean_response)
+        clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
         if clean_response and _recently_sent(user_id):
             logging.warning(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
