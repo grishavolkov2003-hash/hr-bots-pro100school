@@ -37,6 +37,23 @@ client = TelegramClient(
 )
 
 
+async def _resolve_entity_via_dialogs_and_retry(peer, send_coro_factory, action_desc):
+    """Общий фолбэк для "Could not find the input entity" - Telethon не смог
+    собрать адрес для отправки (нет access_hash в БД, пира нет в локальном кэше
+    сессии; кэш обновляется целиком только один раз при старте в main()).
+    Раньше это исключение улетало наверх и ответ кандидату молча терялся -
+    обновляем кэш диалогов (тот же вызов, что и при старте) и пробуем ещё раз,
+    сигналим менеджеру если и это не помогло, вместо тихой потери ответа."""
+    logging.warning(f"Не найден entity для {peer} ({action_desc}), обновляю кэш диалогов и пробую ещё раз")
+    try:
+        await client.get_dialogs(limit=300)
+        return await send_coro_factory()
+    except Exception as e:
+        logging.error(f"Entity для {peer} не нашёлся и после обновления кэша диалогов: {e}")
+        await send_signal(f"⚠️ Не могу написать кандидату {peer} ({action_desc}) - Telegram не отдаёт его entity. Возможно, стоит написать ему вручную, чтобы бот снова его увидел.")
+        raise
+
+
 async def _send_message_safe(peer, text, **kwargs):
     """client.send_message с одной попыткой повтора при FloodWaitError -
     Telethon кидает её на любой исходящий вызов при превышении лимитов,
@@ -47,6 +64,12 @@ async def _send_message_safe(peer, text, **kwargs):
         logging.warning(f"FloodWait {e.seconds}с при отправке {peer}, жду и повторяю")
         await asyncio.sleep(e.seconds)
         return await client.send_message(peer, text, **kwargs)
+    except ValueError as e:
+        if "input entity" not in str(e):
+            raise
+        return await _resolve_entity_via_dialogs_and_retry(
+            peer, lambda: client.send_message(peer, text, **kwargs), "текст"
+        )
 
 
 async def _send_file_safe(peer, path, **kwargs):
@@ -58,6 +81,12 @@ async def _send_file_safe(peer, path, **kwargs):
         logging.warning(f"FloodWait {e.seconds}с при отправке файла {peer}, жду и повторяю")
         await asyncio.sleep(e.seconds)
         return await client.send_file(peer, path, **kwargs)
+    except ValueError as e:
+        if "input entity" not in str(e):
+            raise
+        return await _resolve_entity_via_dialogs_and_retry(
+            peer, lambda: client.send_file(peer, path, **kwargs), "файл"
+        )
 
 
 
@@ -1124,8 +1153,14 @@ async def decision_loop():
 ACTIVE_STATUSES = {
     "НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_ПОЛУЧЕНО",
     "ТЕСТОВОЕ_НА_ПРОВЕРКЕ",
-    "ЗАМОРОЗКА", "ИМПОРТ",
 }
+# ЗАМОРОЗКА/ИМПОРТ раньше входили сюда - patrol гонял live client.get_messages()
+# по ВСЕМ замороженным кандидатам каждые 5 минут без паузы между вызовами, это
+# и было причиной постоянных FloodWait (520 засыпаний/48ч). handler() ловит
+# live-сообщения от любого кандидата независимо от статуса (ЗАМОРОЗКА нет в
+# IGNORE_STATUSES), так что если замороженный ответит - событие поймается и без
+# patrol'а; patrol нужен только как страховка от пропущенных апдейтов для тех,
+# от кого реально ждём ответа.
 
 _patrol_processing = set()
 
@@ -1169,6 +1204,12 @@ async def patrol_loop():
                 _patrol_processing.add(user_id)
                 spawned = False
                 try:
+                    # Пауза перед каждым live-запросом к Telegram - раньше все
+                    # кандидаты в цикле обстреливались get_messages() подряд без
+                    # задержки, что само по себе упиралось в лимит Telegram и
+                    # плодило FloodWait независимо от размера ACTIVE_STATUSES.
+                    # 0.5с между кандидатами держит темп щадящим.
+                    await asyncio.sleep(0.5)
                     try:
                         msgs = await client.get_messages(user_id, limit=5)
                     except Exception:
