@@ -137,8 +137,16 @@ def get_stale_candidates(hours=24):
     now = datetime.now()
     for r in rows:
         d = dict(r)
-        updated = datetime.fromisoformat(d["updated_at"]) if d["updated_at"] else now
-        hours_since = (now - updated).total_seconds() / 3600
+        # Раньше считали от updated_at - но эта отметка сбрасывается ЛЮБЫМ
+        # сообщением от кандидата (даже "."), из-за чего эскалация напоминаний
+        # 24ч/48ч/72ч могла откатываться на старт бесконечно, если кандидат
+        # изредка отвечал что-то незначащее, не продвигаясь по сути. Считаем
+        # от момента ПОСЛЕДНЕГО отправленного напоминания (или первого
+        # контакта, если ещё ни разу не напоминали) - так серия реально
+        # движется вперёд и доходит до ЗАМОРОЗКИ, а не виснет годами.
+        baseline_raw = d.get("last_reminder") or d.get("created_at")
+        baseline = datetime.fromisoformat(baseline_raw) if baseline_raw else now
+        hours_since = (now - baseline).total_seconds() / 3600
         d["hours_since_update"] = hours_since
         if hours_since >= hours:
             result.append(d)

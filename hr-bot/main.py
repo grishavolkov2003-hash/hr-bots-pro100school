@@ -378,7 +378,11 @@ async def handler(event):
         return
 
     add_message(user_id, "candidate", msg_text)
-    update_candidate(user_id, reminder_count=0)
+    # reminder_count намеренно НЕ сбрасываем на любое сообщение - см.
+    # комментарий в storage.py::get_stale_candidates. Любой ответ кандидата
+    # (даже незначащий) раньше полностью откатывал серию напоминаний назад -
+    # реального прогресса это не требовало, из-за чего напоминания могли
+    # идти месяцами. Счётчик двигается только через саму reminder_loop.
 
     # Подстраховка: если анкета ещё не разобрана, пробуем распарсить прямо из сырого
     # сообщения кандидата регуляркой - на случай если LLM не проставит тег АНКЕТА
@@ -600,11 +604,18 @@ async def _do_process(user_id, username, name, chat_id, candidate):
             comment = f"Обр: {anketa.get('образование', '')} | ЕГЭ: {anketa.get('егэ', '')} | Опыт: {anketa.get('опыт', '')} | Часы: {anketa.get('часы', '')}"
             if not qualified and reasons:
                 comment += f" | Не прошёл автоотбор: {reasons}"
-            update_candidate(user_id,
+            # До этого момента name - это сырое имя профиля Telegram (может быть
+            # чем угодно - ником, буквой, эмодзи), а не настоящее имя человека.
+            # Как только кандидат сам назвал себя в анкете - используем это.
+            candidate_kwargs = dict(
                 subject=anketa.get("предмет", ""),
                 comment=comment,
                 auto_qualified=1 if qualified else 0,
             )
+            anketa_name = (anketa.get("имя") or "").strip()
+            if anketa_name and anketa_name != "-" and len(anketa_name) >= 2:
+                candidate_kwargs["name"] = anketa_name
+            update_candidate(user_id, **candidate_kwargs)
             update_anketa(username, anketa)
             logging.info(f"Анкета: {name} — {anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")
 
@@ -691,7 +702,13 @@ async def reminder_loop():
                     status = c.get("status", "")
                     if status not in ("ТЕСТОВОЕ_ОТПРАВЛЕНО",):
                         continue
-                    msg = f"{name}, напоминаю про задания для отбора. Когда планируете выполнить?"
+                    # "name" до заполнения анкеты - это сырой профиль Telegram
+                    # (может быть буквой, ником, чем угодно), не настоящее имя -
+                    # обращаемся по нему только когда есть анкета (c["comment"]).
+                    if c.get("comment"):
+                        msg = f"{name}, напоминаю про задания для отбора. Когда планируете выполнить?"
+                    else:
+                        msg = "Напоминаю про задания для отбора. Когда планируете выполнить?"
                     try:
                         await _send_message_safe(user_id, msg)
                         # Помечаем в истории как авто-напоминание (не в тексте, который
@@ -707,7 +724,10 @@ async def reminder_loop():
                     status = c.get("status", "")
                     if status not in ("ТЕСТОВОЕ_ОТПРАВЛЕНО",):
                         continue
-                    msg = f"{name}, как дела с заданиями? Если есть вопросы — пишите, помогу."
+                    if c.get("comment"):
+                        msg = f"{name}, как дела с заданиями? Если есть вопросы — пишите, помогу."
+                    else:
+                        msg = "Как дела с заданиями? Если есть вопросы — пишите, помогу."
                     try:
                         await _send_message_safe(user_id, msg)
                         add_message(user_id, "bot", f"[авто-напоминание системы, не твои слова] {msg}")
@@ -1128,7 +1148,8 @@ async def patrol_loop():
                             has_creds = True
                         else:
                             add_message(user_id, "candidate", t)
-                    update_candidate(user_id, reminder_count=0)
+                    # reminder_count намеренно НЕ сбрасываем здесь - см. main
+                    # handler() и storage.py::get_stale_candidates.
 
                     if has_creds:
                         continue
@@ -1226,11 +1247,15 @@ async def _patrol_respond(user_id, username, name, delay):
                 comment = f"Обр: {anketa.get('образование', '')} | ЕГЭ: {anketa.get('егэ', '')} | Опыт: {anketa.get('опыт', '')} | Часы: {anketa.get('часы', '')}"
                 if not qualified and reasons:
                     comment += f" | Не прошёл автоотбор: {reasons}"
-                update_candidate(user_id,
+                candidate_kwargs = dict(
                     subject=anketa.get("предмет", ""),
                     comment=comment,
                     auto_qualified=1 if qualified else 0,
                 )
+                anketa_name = (anketa.get("имя") or "").strip()
+                if anketa_name and anketa_name != "-" and len(anketa_name) >= 2:
+                    candidate_kwargs["name"] = anketa_name
+                update_candidate(user_id, **candidate_kwargs)
                 uname_full = f"@{username}" if username else ""
                 update_anketa(uname_full, anketa)
                 logging.info(f"[patrol] Анкета: {name} — {anketa} | Автоотбор: {'ДА' if qualified else 'НЕТ'} ({reasons})")

@@ -98,8 +98,13 @@ STATUS_PROGRESS_SUMMARY = {
 def build_messages(conversation, candidate_info):
     status = candidate_info.get('status', 'НОВЫЙ')
     progress = STATUS_PROGRESS_SUMMARY.get(status, "")
+    # Имя до заполнения анкеты (comment пуст) - это сырой профиль Telegram
+    # (first_name), а не подтверждённое имя человека: может быть буквой,
+    # ником, эмодзи, чем угодно. Явно предупреждаем модель, иначе она
+    # обращается по нему как по настоящему имени в первых же сообщениях.
+    name_note = "" if candidate_info.get("comment") else " (это НЕ подтверждённое имя, а ник/имя из Telegram-профиля - кандидат ещё не представился и не заполнил анкету; не используй это как обращение по имени, общайся нейтрально пока анкета не даст настоящее имя)"
     context = f"""Информация о кандидате:
-- Имя: {candidate_info.get('name', 'неизвестно')}
+- Имя: {candidate_info.get('name', 'неизвестно')}{name_note}
 - Username: {candidate_info.get('username', 'нет')}
 - Предмет: {candidate_info.get('subject', 'не указан')}
 - Статус: {status}
