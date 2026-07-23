@@ -7,7 +7,7 @@ ALLOWED_COLUMNS = {
     "username", "name", "subject", "status", "source", "students_count",
     "has_profi_account", "conversation", "created_at", "updated_at",
     "comment", "score", "reminder_count", "last_reminder", "slots", "access_hash", "conversation_bot",
-    "auto_qualified", "video_received_at",
+    "auto_qualified", "video_received_at", "email",
 }
 
 
@@ -50,11 +50,22 @@ def init_db():
             conn.execute(f"ALTER TABLE pending_slots ADD COLUMN {col}")
         except:
             pass
-    for col_def in ["score INTEGER DEFAULT 0", "reminder_count INTEGER DEFAULT 0", "last_reminder TEXT", "slots TEXT", "source TEXT", "conversation_bot TEXT DEFAULT 'hr'", "access_hash INTEGER DEFAULT 0", "auto_qualified INTEGER DEFAULT 0", "video_received_at TEXT"]:
+    for col_def in ["score INTEGER DEFAULT 0", "reminder_count INTEGER DEFAULT 0", "last_reminder TEXT", "slots TEXT", "source TEXT", "conversation_bot TEXT DEFAULT 'hr'", "access_hash INTEGER DEFAULT 0", "auto_qualified INTEGER DEFAULT 0", "video_received_at TEXT", "email TEXT"]:
         try:
             conn.execute(f"ALTER TABLE candidates ADD COLUMN {col_def}")
         except:
             pass
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mail_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_user_id INTEGER NOT NULL,
+            local_part TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            processed_at TEXT,
+            error TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -162,5 +173,48 @@ def update_conversation_bot(user_id, bot_name):
 def update_access_hash(user_id, access_hash):
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.execute("UPDATE candidates SET access_hash=? WHERE user_id=?", (access_hash, user_id))
+    conn.commit()
+    conn.close()
+
+
+def queue_mailbox_provision(user_id, local_part):
+    """Ставит заявку на создание почтового ящика в очередь - саму отправку
+    делает отдельный mail_provision_loop() через sudo к provision_mailbox.py
+    на mail-сервере. Отделено от смены статуса кандидата специально: сбой
+    почтовой подсистемы (диск, network) не должен уметь сломать или
+    задержать сам HR-флоу, который уже успешно завершился к этому моменту."""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute(
+        "INSERT INTO mail_outbox (candidate_user_id, local_part, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (user_id, local_part, datetime.now().isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_pending_mail_outbox():
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute("SELECT * FROM mail_outbox WHERE status = 'pending' ORDER BY id ASC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def mark_mail_outbox_done(outbox_id):
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute(
+        "UPDATE mail_outbox SET status='done', processed_at=? WHERE id=?",
+        (datetime.now().isoformat(), outbox_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_mail_outbox_failed(outbox_id, error):
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute(
+        "UPDATE mail_outbox SET status='failed', processed_at=?, error=? WHERE id=?",
+        (datetime.now().isoformat(), str(error)[:500], outbox_id),
+    )
     conn.commit()
     conn.close()

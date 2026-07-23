@@ -1,5 +1,6 @@
 import random
 import asyncio
+import subprocess
 import folders as _folders
 import re
 import os
@@ -20,6 +21,7 @@ from storage import (
     init_db, get_candidate, create_candidate, add_message, update_conversation_bot,
     update_candidate, get_conversation, get_all_candidates,
     get_stale_candidates, update_access_hash,
+    queue_mailbox_provision, get_pending_mail_outbox, mark_mail_outbox_done, mark_mail_outbox_failed,
 )
 from llm import get_response, get_manager_response
 import sheets as sheets_module
@@ -1353,6 +1355,40 @@ async def _patrol_respond(user_id, username, name, delay):
         _patrol_processing.discard(user_id)
 
 
+async def mail_provision_loop():
+    """Раз в минуту разгребает очередь mail_outbox - создаёт почтовые ящики
+    через provision_mailbox.py на mail-сервере (тот же VPS, но отдельный
+    процесс от root через узкий sudo - у hrbot нет прямого доступа к
+    /etc/postfix/mail.db и /var/mail/vhosts). Намеренно отделено от кода,
+    который ставит заявку в очередь (queue_mailbox_provision) - сбой здесь
+    (диск, сеть, sudo) не может задержать или сломать сам HR-флоу, который
+    к этому моменту уже успешно завершился."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            for item in get_pending_mail_outbox():
+                try:
+                    result = subprocess.run(
+                        ["sudo", "-n", "/usr/bin/python3", "/opt/mailsystem/provision_mailbox.py",
+                         item["local_part"], str(item["candidate_user_id"])],
+                        capture_output=True, text=True, timeout=15,
+                    )
+                    if result.returncode == 0:
+                        email = result.stdout.strip()
+                        update_candidate(item["candidate_user_id"], email=email)
+                        mark_mail_outbox_done(item["id"])
+                        logging.info(f"[mail] Ящик создан: {email}")
+                    else:
+                        mark_mail_outbox_failed(item["id"], result.stderr.strip())
+                        logging.warning(f"[mail] Провижининг {item['local_part']} упал: {result.stderr.strip()}")
+                except Exception as e:
+                    mark_mail_outbox_failed(item["id"], str(e))
+                    logging.warning(f"[mail] Ошибка провижининга {item['local_part']}: {e}")
+        except Exception as e:
+            logging.error(f"[mail] mail_provision_loop error: {e}")
+        await asyncio.sleep(60)
+
+
 async def sheets_sync_loop():
     """Синхронизирует статусы из БД в Google Sheets каждые 5 минут."""
     await asyncio.sleep(120)
@@ -1442,6 +1478,7 @@ async def main():
     asyncio.create_task(patrol_loop())
     asyncio.create_task(auto_qualified_sweep_loop())
     asyncio.create_task(sheets_sync_loop())
+    asyncio.create_task(mail_provision_loop())
     asyncio.create_task(heartbeat_loop())
     asyncio.create_task(_folders.folder_sync_loop(client, _folder_event))
     await client.run_until_disconnected()

@@ -1,5 +1,6 @@
 import sqlite3
 import json
+import re
 import logging
 from datetime import datetime
 from telegram import (
@@ -99,6 +100,46 @@ def save_manager_decision(user_id, decision, approved_by=None):
     conn.execute(
         "INSERT INTO manager_decisions (candidate_user_id, decision, created_at, approved_by) VALUES (?, ?, ?, ?)",
         (user_id, decision, datetime.now().isoformat(), approved_by)
+    )
+    conn.commit()
+    conn.close()
+
+
+MAILBOX_LOCAL_PART_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{1,62}[a-z0-9]$")
+
+
+def mailbox_local_part_for(candidate):
+    """Ник кандидата в Telegram годится как есть (латиница/цифры/подчёркивания
+    по правилам самого Telegram) - используем его как local-part адреса. Если
+    ника нет или он не проходит валидацию provision_mailbox.py на сервере -
+    падаем на 'tutor<user_id>', гарантированно валидный и уникальный."""
+    username = (candidate.get("username") or "").lstrip("@").lower()
+    if MAILBOX_LOCAL_PART_RE.match(username):
+        return username
+    return f"tutor{candidate['user_id']}"
+
+
+def queue_mailbox_provision(user_id, local_part):
+    """Заявка на создание почтового ящика - саму отправку делает отдельный
+    mail_provision_loop() в hr-bot/main.py через sudo к provision_mailbox.py
+    на mail-сервере. Отделено от смены статуса намеренно: сбой почтовой
+    подсистемы не должен уметь задержать или сломать то, что менеджер только
+    что успешно отметил в этом боте."""
+    conn = sqlite3.connect(DB_PATH, timeout=10)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS mail_outbox (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            candidate_user_id INTEGER NOT NULL,
+            local_part TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            processed_at TEXT,
+            error TEXT
+        )
+    """)
+    conn.execute(
+        "INSERT INTO mail_outbox (candidate_user_id, local_part, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (user_id, local_part, datetime.now().isoformat()),
     )
     conn.commit()
     conn.close()
@@ -502,6 +543,10 @@ async def button_callback(update: Update, context):
         who = query.from_user.id
         update_candidate_status(user_id, "ДОГОВОР_ПОДПИСАН")
         save_manager_decision(user_id, "contract_signed", approved_by=who)
+        try:
+            queue_mailbox_provision(user_id, mailbox_local_part_for(candidate))
+        except Exception as e:
+            logging.error(f"Не удалось поставить в очередь создание почты для {user_id}: {e}")
 
         await query.answer("Отмечено! Бот пришлёт запрос на фото/диплом.")
         await query.edit_message_text(
