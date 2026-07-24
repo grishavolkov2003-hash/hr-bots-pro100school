@@ -104,6 +104,7 @@ FILE_PATTERN = re.compile(r"^\s*>{0,4}\s*ОТПРАВИТЬ_ФАЙЛ:\s*(\S+)\s*
 ANKETA_PATTERN = re.compile(r"^\s*>{0,4}\s*АНКЕТА:\s*(.+?)\s*(?:<{2,4}\s*)?$", re.MULTILINE)
 STATUS_PATTERN = re.compile(r"^\s*>{0,4}\s*СТАТУС:\s*(\S+?)\s*(?:<{2,4})?\s*$", re.MULTILINE)
 SCORE_PATTERN = re.compile(r"^\s*>{0,4}\s*СКОР:\s*(\d+)\s*(?:<{2,4})?\s*$", re.MULTILINE)
+TASKS_READY_PATTERN = re.compile(r"^\s*>{0,4}\s*ЗАДАНИЯ_ГОТОВЫ\s*(?:<{2,4})?\s*$", re.MULTILINE)
 CREDS_PATTERN = re.compile(r"(?i)(?:логин|login)\s*[:=\-]?\s*(\S+)[\s\n]+(?:пароль|password|pass)\s*[:=\-]?\s*(\S+)")
 
 VALID_STATUSES = {
@@ -294,6 +295,40 @@ async def send_signal(text):
         logging.info(f"Failed to send signal: {e}")
 
 
+async def _forward_task_videos(user_id, name, username):
+    """Кандидат сказал 'всё готово' (видеовизитка + видеоразбор одного из
+    4 заданий) - берём последние сообщения из чата, ищем там видео, шлём
+    их напрямую mx_mish вместе с анкетой, чтобы не искать вручную в
+    переписке. Статус ставит КОД по факту найденного видео, не LLM через
+    тег СТАТУС - тот же инвариант, что уже был для ТЕСТОВОЕ_ПОЛУЧЕНО."""
+    try:
+        msgs = await client.get_messages(user_id, limit=10)
+    except Exception as e:
+        logging.warning(f"[tasks_ready] Не смог получить историю для {name}: {e}")
+        return
+    video_msgs = [
+        m for m in msgs
+        if m.video or m.video_note or m.voice
+        or (m.document and (m.document.mime_type or "").startswith("video/"))
+    ]
+    if not video_msgs:
+        logging.warning(f"[tasks_ready] {name} сказал что готово, но видео в последних {len(msgs)} сообщениях не нашлось - не трогаю статус")
+        return
+    candidate = get_candidate(user_id)
+    comment = (candidate or {}).get("comment", "")
+    subject = (candidate or {}).get("subject", "")
+    try:
+        await client.forward_messages("mx_mish", messages=list(reversed(video_msgs)), from_peer=user_id)
+        await _send_message_safe("mx_mish", f"☝️ Видеовизитка + разбор задания от {name} ({username})\nПредмет: {subject}\nАнкета: {comment}")
+    except Exception as e:
+        logging.error(f"[tasks_ready] Не смог переслать видео mx_mish для {name}: {e}")
+        return
+    update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
+    update_status(username, "ТЕСТОВОЕ_ПОЛУЧЕНО")
+    _folders.trigger_sync(_folder_event)
+    logging.info(f"[tasks_ready] Переслал {len(video_msgs)} видео mx_mish для {name} ({username}), статус -> ТЕСТОВОЕ_ПОЛУЧЕНО")
+
+
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handler(event):
     sender = await event.get_sender()
@@ -333,10 +368,10 @@ async def handler(event):
     msg_text = event.message.text or ""
 
     if event.message.video or event.message.video_note:
+        # Статус НЕ переключаем на первое же видео - теперь нужно ОБА видео
+        # (визитка + видеоразбор задания), переход делает _forward_task_videos
+        # по явному тегу ЗАДАНИЯ_ГОТОВЫ, когда кандидат сам скажет что готово.
         msg_text = "[Отправлено медиа: видео/голосовое]"
-        if candidate["status"] in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
-            update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
-            update_status(username, "ТЕСТОВОЕ_ПОЛУЧЕНО")
     elif event.message.voice:
         msg_text = "[Отправлено голосовое сообщение]"
         # Голосовое НЕ является видеовизиткой — статус не меняем
@@ -345,14 +380,9 @@ async def handler(event):
         mime = doc.mime_type or ""
         if mime.startswith("video/"):
             # Видео, отправленное как файл (а не нативным video-сообщением) -
-            # частый случай для больших файлов или "Отправить как документ" -
-            # раньше падало в общий "[Отправлен файл]" без смены статуса,
-            # кандидат реально прислал видеовизитку, а система об этом не знала
-            # и продолжала слать напоминания "пришлите видео" бесконечно.
+            # частый случай для больших файлов или "Отправить как документ".
+            # Статус так же не переключаем здесь - см. комментарий выше.
             msg_text = "[Отправлено медиа: видео/голосовое]"
-            if candidate["status"] in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
-                update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
-                update_status(username, "ТЕСТОВОЕ_ПОЛУЧЕНО")
         elif "pdf" in mime or "word" in mime or "document" in mime:
             try:
                 data = await client.download_media(event.message, file=io.BytesIO())
@@ -582,7 +612,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     if not response:
         if llm_failed:
             last_text = (conversation[-1].get("content") or conversation[-1].get("text", ""))[:200] if conversation else ""
-            await send_signal(f"⚠️ LLM не ответил {name} ({username}) после повтора - нужно ответить вручную.\nПоследнее сообщение: {last_text}")
+            await _send_message_safe("mx_mish", f"⚠️ LLM не ответил {name} ({username}) после повтора - нужно ответить вручную.\nПоследнее сообщение: {last_text}")
         return
 
     for marker in GARBAGE_MARKERS:
@@ -601,12 +631,14 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     anketas = ANKETA_PATTERN.findall(response)
     statuses = STATUS_PATTERN.findall(response)
     scores = SCORE_PATTERN.findall(response)
+    tasks_ready = TASKS_READY_PATTERN.search(response) is not None
 
     clean_response = SIGNAL_PATTERN.sub("", response)
     clean_response = FILE_PATTERN.sub("", clean_response)
     clean_response = ANKETA_PATTERN.sub("", clean_response)
     clean_response = STATUS_PATTERN.sub("", clean_response)
     clean_response = SCORE_PATTERN.sub("", clean_response)
+    clean_response = TASKS_READY_PATTERN.sub("", clean_response)
     clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
     if clean_response and _recently_sent(user_id):
@@ -670,6 +702,11 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     # значением и пропускал стале-статус LLM поверх свежего решения
     # менеджера. Берём статус заново, непосредственно перед использованием.
     old_status = (get_candidate(user_id) or candidate)["status"]
+
+    if tasks_ready and old_status == "ТЕСТОВОЕ_ОТПРАВЛЕНО":
+        await _forward_task_videos(user_id, name, username)
+        old_status = (get_candidate(user_id) or candidate)["status"]
+
     new_status = old_status
     if statuses:
         llm_status = statuses[-1].strip()
@@ -1142,16 +1179,13 @@ async def patrol_loop():
                         t = m.text or ""
                         if not t.strip():
                             if m.video or m.video_note or m.voice:
+                                # Статус НЕ переключаем здесь - нужно ОБА видео
+                                # (визитка + разбор), переход через _forward_task_videos
+                                # по тегу ЗАДАНИЯ_ГОТОВЫ, см. handler().
                                 t = "[Отправлено медиа: видео/голосовое]"
-                                if c.get("status") in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
-                                    update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
-                                    update_status(c.get("username", ""), "ТЕСТОВОЕ_ПОЛУЧЕНО")
                             elif m.document:
                                 if (m.document.mime_type or "").startswith("video/"):
                                     t = "[Отправлено медиа: видео/голосовое]"
-                                    if c.get("status") in ("НОВЫЙ", "ТЕСТОВОЕ_ОТПРАВЛЕНО", "ТЕСТОВОЕ_НА_ПРОВЕРКЕ", "ТЕСТОВОЕ_ПОЛУЧЕНО"):
-                                        update_candidate(user_id, status="ТЕСТОВОЕ_ПОЛУЧЕНО", video_received_at=datetime.now().isoformat())
-                                        update_status(c.get("username", ""), "ТЕСТОВОЕ_ПОЛУЧЕНО")
                                 else:
                                     t = "[Отправлен документ]"
                             elif m.photo:
@@ -1245,7 +1279,7 @@ async def _patrol_respond(user_id, username, name, delay):
         if not response:
             if llm_failed:
                 last_text = (conversation[-1].get("content") or conversation[-1].get("text", ""))[:200] if conversation else ""
-                await send_signal(f"⚠️ LLM не ответил {name} ({username}) после повтора - нужно ответить вручную.\nПоследнее сообщение: {last_text}")
+                await _send_message_safe("mx_mish", f"⚠️ LLM не ответил {name} ({username}) после повтора - нужно ответить вручную.\nПоследнее сообщение: {last_text}")
             return
 
         for marker in GARBAGE_MARKERS:
@@ -1264,12 +1298,14 @@ async def _patrol_respond(user_id, username, name, delay):
         anketas = ANKETA_PATTERN.findall(response)
         statuses = STATUS_PATTERN.findall(response)
         scores = SCORE_PATTERN.findall(response)
+        tasks_ready = TASKS_READY_PATTERN.search(response) is not None
 
         clean_response = SIGNAL_PATTERN.sub("", response)
         clean_response = FILE_PATTERN.sub("", clean_response)
         clean_response = ANKETA_PATTERN.sub("", clean_response)
         clean_response = STATUS_PATTERN.sub("", clean_response)
         clean_response = SCORE_PATTERN.sub("", clean_response)
+        clean_response = TASKS_READY_PATTERN.sub("", clean_response)
         clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
         if clean_response and _recently_sent(user_id):
@@ -1323,6 +1359,12 @@ async def _patrol_respond(user_id, username, name, delay):
 
         # см. комментарий в _do_process - тот же refetch против той же гонки
         old_status = (get_candidate(user_id) or candidate)["status"]
+        uname_full = f"@{username}" if username else ""
+
+        if tasks_ready and old_status == "ТЕСТОВОЕ_ОТПРАВЛЕНО":
+            await _forward_task_videos(user_id, name, uname_full)
+            old_status = (get_candidate(user_id) or candidate)["status"]
+
         if statuses:
             llm_status = statuses[-1].strip()
             if llm_status in VALID_STATUSES and llm_status != old_status and old_status != "ПЕРЕДАН_МЕНЕДЖЕРУ":
