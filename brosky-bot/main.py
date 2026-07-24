@@ -101,6 +101,7 @@ ANKETA_PATTERN = re.compile(r"^\s*>{0,4}\s*АНКЕТА:\s*(.+?)\s*(?:<{2,4}\s*)
 STATUS_PATTERN = re.compile(r"^\s*>{0,4}\s*СТАТУС:\s*(\S+?)\s*(?:<{2,4})?\s*$", re.MULTILINE)
 SCORE_PATTERN = re.compile(r"^\s*>{0,4}\s*СКОР:\s*(\d+)\s*(?:<{2,4})?\s*$", re.MULTILINE)
 TASKS_READY_PATTERN = re.compile(r"^\s*>{0,4}\s*ЗАДАНИЯ_ГОТОВЫ\s*(?:<{2,4})?\s*$", re.MULTILINE)
+CONTRACT_READY_PATTERN = re.compile(r"^\s*>{0,4}\s*ДОГОВОР_ГОТОВ\s*(?:<{2,4})?\s*$", re.MULTILINE)
 CREDS_PATTERN = re.compile(r"(?i)(?:логин|login)\s*[:=\-]?\s*(\S+)[\s\n]+(?:пароль|password|pass)\s*[:=\-]?\s*(\S+)")
 
 # Авто-звонок: вместо живого созвона детерминированно (без LLM) шлём этот пакет
@@ -115,7 +116,11 @@ AUTO_CALL_TEXT_2 = (
 AUTO_CALL_AUDIO_PATH = os.path.join(os.path.dirname(__file__) or ".", "assets", "delovoe_predlozhenie.m4a")
 AUTO_CALL_CONTRACT_PATH = os.path.join(os.path.dirname(__file__) or ".", "assets", "dogovor_partnerskiy.pdf")
 
-FILE_RECEIVED_ACK = "Вижу что прислали файл, спасибо, передаю."
+FILE_RECEIVED_ACK = (
+    "Вижу что прислали файл, спасибо! Как всё подпишете и это будет "
+    "финальный вариант - напишите отдельным сообщением что договор "
+    "подписан и отправлен, чтобы я передал его дальше."
+)
 
 AFTER_SIGNED_TEXT = (
     "После подписания договора нам нужно от вас:\n"
@@ -356,6 +361,52 @@ async def _forward_task_videos(user_id, name, username):
     logging.info(f"[tasks_ready] Переслал {len(video_msgs)} видео mx_mish для {name} ({username}), статус -> ТЕСТОВОЕ_ПОЛУЧЕНО")
 
 
+async def _forward_signed_contract(user_id, name, username):
+    """Кандидат подтвердил словами что договор подписан и отправлен - берём
+    последние сообщения, ищем там фото/файл, пересылаем mx_mish вместе с
+    анкетой (та же схема что и _forward_task_videos). В отличие от видео -
+    статус НЕ трогаем: финальный гейт (ДОГОВОР_ПОДПИСАН + запуск создания
+    почты) по решению Шефа остаётся за ручной кнопкой "✅ Подписан" в
+    manager_bot.py, которую mx_mish жмёт уже ПОСЛЕ короткого звонка с
+    кандидатом - звонок нужен чтобы убедиться что на связи реальный
+    адекватный человек, это код проверить не может.
+
+    Статус тут НЕ меняется (в отличие от видео), поэтому нет естественной
+    защиты от повтора через "old_status != ожидаемый" - кандидат может
+    написать подтверждение ещё раз, пока mx_mish тянет со звонком, и без
+    отдельного флага пересылка+алерт улетели бы менеджеру повторно на
+    каждое такое сообщение. contract_confirmed_at - разовый флаг именно
+    под эту защиту (найдено ревью критика)."""
+    candidate = get_candidate(user_id)
+    if (candidate or {}).get("contract_confirmed_at"):
+        logging.info(f"[contract_ready] {name} уже подтверждал подпись ранее ({candidate['contract_confirmed_at']}) - повторно не пересылаю")
+        return
+    try:
+        msgs = await client.get_messages(user_id, limit=10)
+    except Exception as e:
+        logging.warning(f"[contract_ready] Не смог получить историю для {name}: {e}")
+        return
+    file_msgs = [m for m in msgs if m.photo or m.document]
+    if not file_msgs:
+        logging.warning(f"[contract_ready] {name} сказал что договор подписан, но файла/фото в последних {len(msgs)} сообщениях не нашлось - не пересылаю")
+        return
+    comment = (candidate or {}).get("comment", "")
+    try:
+        await client.forward_messages("mx_mish", messages=list(reversed(file_msgs)), from_peer=user_id)
+        await _send_message_safe(
+            "mx_mish",
+            f"📄 Договор подписан, прислал скан {name} ({username})\n"
+            f"Анкета: {comment}\n"
+            f"⚠️ Нужен короткий созвон (5-10 мин) - убедиться что человек адекватный "
+            f"и обсудить дальнейшие шаги. После звонка жми \"✅ Подписан\"."
+        )
+    except Exception as e:
+        logging.error(f"[contract_ready] Не смог переслать договор mx_mish для {name}: {e}")
+        return
+    update_candidate(user_id, contract_confirmed_at=datetime.now().isoformat())
+    logging.info(f"[contract_ready] Переслал скан договора mx_mish для {name} ({username}), статус не менял - ждём звонка и ручной кнопки")
+
+
 @client.on(events.NewMessage(incoming=True, func=lambda e: e.is_private))
 async def handler(event):
     sender = await event.get_sender()
@@ -411,12 +462,22 @@ async def handler(event):
         return
 
     msg_text = event.message.text or ""
+    # Подпись к файлу/фото (caption) - сохраняем ОТДЕЛЬНО от плейсхолдера
+    # вложения. Раньше при наличии caption плейсхолдер ("[Отправлено фото]"
+    # и т.п.) либо вообще не попадал в историю (перезаписывался подписью),
+    # либо для pdf/word - наоборот, подпись затиралась декодированным
+    # бинарным мусором из download_media. LLM в итоге не видела ОДНОВРЕМЕННО
+    # и факт вложения, и текст подписи - критично для QA-режима договора,
+    # где кандидат пишет "договор подписан" именно как подпись к скану.
+    original_caption = msg_text.strip()
 
     if event.message.video or event.message.video_note or event.message.voice:
         # Статус НЕ переключаем на первое же видео - теперь нужно ОБА видео
         # (визитка + видеоразбор задания), переход делает _forward_task_videos
         # по явному тегу ЗАДАНИЯ_ГОТОВЫ, когда кандидат сам скажет что готово.
         msg_text = "[Отправлено медиа: видео/голосовое]"
+        if original_caption:
+            msg_text = f"{original_caption}\n{msg_text}"
     elif event.message.document:
         doc = event.message.document
         mime = doc.mime_type or ""
@@ -425,26 +486,41 @@ async def handler(event):
             # частый случай для больших файлов или "Отправить как документ".
             # Статус так же не переключаем здесь - см. комментарий выше.
             msg_text = "[Отправлено медиа: видео/голосовое]"
+            if original_caption:
+                msg_text = f"{original_caption}\n{msg_text}"
         elif "pdf" in mime or "word" in mime or "document" in mime:
             try:
                 data = await client.download_media(event.message, file=io.BytesIO())
                 if data:
                     data.seek(0)
                     text_content = data.read().decode("utf-8", errors="ignore")[:3000]
-                    msg_text = f"[Содержимое резюме: {text_content}]"
+                    msg_text = f"[Отправлен документ]\n[Содержимое резюме: {text_content}]"
+                    if original_caption:
+                        msg_text = f"{original_caption}\n{msg_text}"
             except Exception as e:
                 logging.error(f"Doc download error: {e}")
-                msg_text = msg_text or "[Отправлен документ]"
+                msg_text = "[Отправлен документ]"
+                if original_caption:
+                    msg_text = f"{original_caption}\n{msg_text}"
         else:
-            msg_text = msg_text or "[Отправлен файл]"
+            msg_text = "[Отправлен файл]"
+            if original_caption:
+                msg_text = f"{original_caption}\n{msg_text}"
     elif event.message.photo:
-        msg_text = msg_text or "[Отправлено фото]"
+        msg_text = "[Отправлено фото]"
+        if original_caption:
+            msg_text = f"{original_caption}\n{msg_text}"
 
-    # Кандидат прислал файл (предположительно подписанный договор), пока статус
-    # ДОГОВОР_ОТПРАВЛЕН - подтверждаем получение и ЗАТИХАЕМ, статус не трогаем.
-    # Дальше ведёт Броски вручную через кнопку "✅ Подписан" (см. manager_bot.py) -
-    # бот сам предполагать что договор подписан не должен.
-    if candidate["status"] == "ДОГОВОР_ОТПРАВЛЕН" and (event.message.document or event.message.photo):
+    # Кандидат прислал файл (предположительно подписанный договор) БЕЗ подписи-
+    # комментария, пока статус ДОГОВОР_ОТПРАВЛЕН - подтверждаем получение и
+    # напоминаем написать фразу-подтверждение отдельным сообщением. Если файл
+    # пришёл С подписью (caption) - НЕ перехватываем здесь, пускаем в обычный
+    # QA-пайплайн ниже: LLM увидит текст подписи и, если это и есть фраза
+    # "договор подписан" - сама поставит тег ДОГОВОР_ГОТОВ (см. prompt.py,
+    # QA_SYSTEM_PROMPT). Раньше короткое замыкание срабатывало ВСЕГДА на
+    # файл/фото и глотало caption целиком - фраза-подтверждение в подписи
+    # к фото никогда не долетала бы до модели.
+    if candidate["status"] == "ДОГОВОР_ОТПРАВЛЕН" and (event.message.document or event.message.photo) and not (event.message.text or "").strip():
         try:
             await client.send_read_acknowledge(event.chat_id)
         except:
@@ -656,13 +732,21 @@ async def _process_qa_message(user_id, username, name, chat_id):
             return
 
     signals = SIGNAL_PATTERN.findall(response)
+    contract_ready = CONTRACT_READY_PATTERN.search(response) is not None
     clean_response = SIGNAL_PATTERN.sub("", response)
+    clean_response = CONTRACT_READY_PATTERN.sub("", clean_response)
     clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
+    # Раньше guard делал return из ВСЕЙ функции - сигналы и обработка
+    # contract_ready ниже (за пределами этого if) из-за этого тоже теряли -
+    # ся молча, если недавно уже отвечали (найдено ревью критика). Теперь,
+    # как и в _do_process, гасим только текст ответа, остальная обработка
+    # (сигналы, пересылка договора) идёт своим чередом независимо от неё.
+    if clean_response and _recently_sent(user_id):
+        logging.warning(f"[qa][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
+        clean_response = ""
+
     if clean_response:
-        if _recently_sent(user_id):
-            logging.warning(f"[qa][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
-            return
         clean_response = clean_response.replace("—", "-").replace("–", "-")
         is_instant = username and username.lower().lstrip("@") in INSTANT_USERS
         if not is_instant:
@@ -684,6 +768,9 @@ async def _process_qa_message(user_id, username, name, chat_id):
             logging.info(f"[qa] Сигнал отправлен @mx_mish: {name}")
         except Exception as e:
             logging.error(f"[qa] Signal send error: {e}")
+
+    if contract_ready:
+        await _forward_signed_contract(user_id, name, username)
 
 
 async def _wait_and_reserve(user_id, max_wait_sec=30):

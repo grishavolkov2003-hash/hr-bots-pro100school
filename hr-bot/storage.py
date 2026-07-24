@@ -7,7 +7,7 @@ ALLOWED_COLUMNS = {
     "username", "name", "subject", "status", "source", "students_count",
     "has_profi_account", "conversation", "created_at", "updated_at",
     "comment", "score", "reminder_count", "last_reminder", "slots", "access_hash", "conversation_bot",
-    "auto_qualified", "video_received_at", "email",
+    "auto_qualified", "video_received_at", "email", "contract_confirmed_at",
 }
 
 
@@ -50,7 +50,7 @@ def init_db():
             conn.execute(f"ALTER TABLE pending_slots ADD COLUMN {col}")
         except:
             pass
-    for col_def in ["score INTEGER DEFAULT 0", "reminder_count INTEGER DEFAULT 0", "last_reminder TEXT", "slots TEXT", "source TEXT", "conversation_bot TEXT DEFAULT 'hr'", "access_hash INTEGER DEFAULT 0", "auto_qualified INTEGER DEFAULT 0", "video_received_at TEXT", "email TEXT"]:
+    for col_def in ["score INTEGER DEFAULT 0", "reminder_count INTEGER DEFAULT 0", "last_reminder TEXT", "slots TEXT", "source TEXT", "conversation_bot TEXT DEFAULT 'hr'", "access_hash INTEGER DEFAULT 0", "auto_qualified INTEGER DEFAULT 0", "video_received_at TEXT", "email TEXT", "contract_confirmed_at TEXT"]:
         try:
             conn.execute(f"ALTER TABLE candidates ADD COLUMN {col_def}")
         except:
