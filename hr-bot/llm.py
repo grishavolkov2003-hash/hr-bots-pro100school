@@ -1,6 +1,7 @@
 import anthropic
 import json
 import re
+import time
 import logging
 from config import ANTHROPIC_API_KEY
 from prompt import SYSTEM_PROMPT
@@ -128,43 +129,49 @@ def build_messages(conversation, candidate_info):
     return messages
 
 
+def _call_llm(system_prompt, messages, log_prefix):
+    """Один повтор через 3с при сбое API (наблюдались регулярные короткие
+    вспышки 401 Invalid API key у прокси-провайдера - несколько раз за
+    сутки, по несколько минут каждая - которые до этого молча хоронили
+    ответ кандидату без единой попытки повтора). Возвращает (text, failed)
+    - failed=True означает что обе попытки провалились, вызывающий код
+    должен просигналить менеджеру, а не просто промолчать."""
+    for attempt in range(2):
+        try:
+            response = client.messages.create(
+                model=MODEL,
+                max_tokens=2048,
+                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
+                messages=messages,
+            )
+            if response.stop_reason in ("max_tokens", "length"):
+                # Ответ обрублен на середине (не хватило токенов на видимый
+                # текст, например из-за длинного скрытого reasoning) - лучше
+                # не слать кандидату обрывок фразы, чем отправить битое
+                # сообщение. Это не сбой API - повтор тут не поможет.
+                logging.info(f"{log_prefix} truncated (max_tokens hit), пропускаем ответ")
+                return None, False
+            return _strip_thinking(response.content[0].text), False
+        except Exception as e:
+            if attempt == 0:
+                logging.warning(f"{log_prefix} error (попытка 1/2, повтор через 3с): {e}")
+                time.sleep(3)
+            else:
+                logging.error(f"{log_prefix} error (попытка 2/2, сдаюсь): {e}")
+    return None, True
+
+
 def get_response(conversation, candidate_info):
+    """Возвращает (text, failed). failed=True значит обе попытки к LLM
+    упали (не путать с truncated/max_tokens - там failed=False, повтор не
+    поможет) - вызывающий код должен просигналить менеджеру, а не молчать."""
     messages = build_messages(conversation, candidate_info)
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
-            system=[{"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
-            messages=messages,
-        )
-        if response.stop_reason in ("max_tokens", "length"):
-            # Ответ обрублен на середине (не хватило токенов на видимый текст,
-            # например из-за длинного скрытого reasoning) - лучше не слать
-            # кандидату обрывок фразы, чем отправить битое сообщение.
-            logging.info(f"LLM truncated (max_tokens hit), пропускаем ответ")
-            return None
-        return _strip_thinking(response.content[0].text)
-    except Exception as e:
-        logging.error(f"LLM error: {e}")
-        return None
+    return _call_llm(SYSTEM_PROMPT, messages, "LLM")
 
 
 def get_qa_response(conversation, candidate_info, qa_system_prompt):
     messages = build_messages(conversation, candidate_info)
-    try:
-        response = client.messages.create(
-            model=MODEL,
-            max_tokens=2048,
-            system=[{"type": "text", "text": qa_system_prompt, "cache_control": {"type": "ephemeral"}}],
-            messages=messages,
-        )
-        if response.stop_reason in ("max_tokens", "length"):
-            logging.info(f"QA LLM truncated (max_tokens hit), пропускаем ответ")
-            return None
-        return _strip_thinking(response.content[0].text)
-    except Exception as e:
-        logging.error(f"QA LLM error: {e}")
-        return None
+    return _call_llm(qa_system_prompt, messages, "QA LLM")
 
 
 MANAGER_SYSTEM = """Ты — ассистент менеджера онлайн-школы по найму репетиторов. Менеджер пишет тебе в Telegram, ты отвечаешь коротко и по делу.

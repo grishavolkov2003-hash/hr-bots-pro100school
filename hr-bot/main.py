@@ -570,7 +570,7 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     except:
         pass
 
-    response = await asyncio.to_thread(get_response, conversation, candidate)
+    response, llm_failed = await asyncio.to_thread(get_response, conversation, candidate)
     _message_buffer.pop(user_id, None)
     _pending_messages.pop(user_id, None)
 
@@ -580,6 +580,9 @@ async def _do_process(user_id, username, name, chat_id, candidate):
         pass
 
     if not response:
+        if llm_failed:
+            last_text = (conversation[-1].get("content") or conversation[-1].get("text", ""))[:200] if conversation else ""
+            await send_signal(f"⚠️ LLM не ответил {name} ({username}) после повтора - нужно ответить вручную.\nПоследнее сообщение: {last_text}")
         return
 
     for marker in GARBAGE_MARKERS:
@@ -1232,7 +1235,7 @@ async def _patrol_respond(user_id, username, name, delay):
         except:
             pass
 
-        response = await asyncio.to_thread(get_response, conversation, candidate)
+        response, llm_failed = await asyncio.to_thread(get_response, conversation, candidate)
 
         try:
             await client(SetTypingRequest(peer=user_id, action=SendMessageCancelAction()))
@@ -1240,6 +1243,9 @@ async def _patrol_respond(user_id, username, name, delay):
             pass
 
         if not response:
+            if llm_failed:
+                last_text = (conversation[-1].get("content") or conversation[-1].get("text", ""))[:200] if conversation else ""
+                await send_signal(f"⚠️ LLM не ответил {name} ({username}) после повтора - нужно ответить вручную.\nПоследнее сообщение: {last_text}")
             return
 
         for marker in GARBAGE_MARKERS:

@@ -357,7 +357,7 @@ async def test_do_process_uses_fresh_status_not_stale_snapshot(make_candidate, m
     stale_candidate["status"] = "ТЕСТОВОЕ_ПОЛУЧЕНО"  # снэпшот до решения менеджера
 
     def fake_get_response(conversation, candidate_info):
-        return "Спасибо! >>> СТАТУС: ТЕСТОВОЕ_НА_ПРОВЕРКЕ <<<"
+        return "Спасибо! >>> СТАТУС: ТЕСТОВОЕ_НА_ПРОВЕРКЕ <<<", False
 
     async def fake_send_message(chat_id, text):
         pass

@@ -128,7 +128,7 @@ async def test_qa_barrier_blocks_concurrent_duplicate_send(make_candidate, monke
         pass
 
     def fake_get_qa_response(conversation, candidate, prompt):
-        return "Комиссия 25%, всё как в договоре."
+        return "Комиссия 25%, всё как в договоре.", False
 
     monkeypatch.setattr(main.client, "send_message", fake_send_message)
     monkeypatch.setattr(main, "_simulate_typing", fake_simulate_typing)
@@ -349,7 +349,7 @@ async def test_do_process_uses_fresh_status_not_stale_snapshot(make_candidate, m
     stale_candidate["status"] = "ТЕСТОВОЕ_ПОЛУЧЕНО"
 
     def fake_get_response(conversation, candidate_info):
-        return "Спасибо! >>> СТАТУС: ТЕСТОВОЕ_НА_ПРОВЕРКЕ <<<"
+        return "Спасибо! >>> СТАТУС: ТЕСТОВОЕ_НА_ПРОВЕРКЕ <<<", False
 
     async def fake_send_message(chat_id, text):
         pass
