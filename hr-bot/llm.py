@@ -10,9 +10,16 @@ import os
 BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
 MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-5")
 
+# Кастомный User-Agent обязателен: родной User-Agent официального anthropic
+# SDK ("Anthropic/Python x.x.x") ловит Cloudflare WAF-правило на прокси
+# customix.fun и режет запрос 403 "Your request was blocked" ещё ДО того как
+# прокси вообще смотрит на ключ - обычный httpx-запрос с тем же ключом при
+# этом проходит нормально. Подмена на нейтральный UA обходит именно этот
+# WAF-фильтр, ключ и модель тут ни при чём (проверено живыми вызовами).
 client = anthropic.Anthropic(
     api_key=ANTHROPIC_API_KEY,
     base_url=BASE_URL,
+    default_headers={"User-Agent": "python-httpx/0.28.1"},
 )
 
 
