@@ -206,15 +206,15 @@ def parse_anketa(raw):
     return data
 
 
-NO_EXPERIENCE_MARKERS = ["нет", "без опыта", "не было", "отсутствует", "не имею"]
-
-
 def evaluate_auto_criteria(anketa):
-    """Автоотбор по анкете: ЕГЭ >= 60 (если сдавал) + опыт > 0 + возраст >= 18.
+    """Автоотбор по анкете: ЕГЭ >= 60 (если сдавал) + возраст >= 18.
+
+    Критерий опыта убран (решение Шефа 2026-07-26) - без опыта тоже берём,
+    опыт остаётся видимым менеджеру в comment, но больше не блокирует автоотбор.
 
     Поля не по формату (без цифр, старая анкета без вопроса о возрасте) не должны
-    блокировать явно сильных кандидатов - там где нет прямого "нет"/явно малого
-    возраста, критерий считается пройденным.
+    блокировать явно сильных кандидатов - там где нет явно малого возраста,
+    критерий считается пройденным.
     """
     reasons = []
 
@@ -228,18 +228,6 @@ def evaluate_auto_criteria(anketa):
     if not ege_ok:
         reasons.append(f"ЕГЭ={ege_raw or '?'}")
 
-    exp_raw = (anketa.get("опыт") or "").strip().lower()
-    exp_nums = re.findall(r'\d+', exp_raw)
-    if exp_nums:
-        exp_ok = int(exp_nums[0]) > 0
-    elif any(m in exp_raw for m in NO_EXPERIENCE_MARKERS):
-        exp_ok = False
-    else:
-        # без цифр, но и без явного отказа ("около года", "пару лет") - считаем что опыт есть
-        exp_ok = bool(exp_raw) and exp_raw != "-"
-    if not exp_ok:
-        reasons.append(f"опыт={exp_raw or '?'}")
-
     age_raw = (anketa.get("возраст") or "").strip().lower()
     age_nums = re.findall(r'\d+', age_raw)
     if age_nums:
@@ -250,7 +238,7 @@ def evaluate_auto_criteria(anketa):
     if not age_ok:
         reasons.append(f"возраст={age_raw or '?'}")
 
-    qualified = ege_ok and exp_ok and age_ok
+    qualified = ege_ok and age_ok
     return qualified, "; ".join(reasons)
 
 

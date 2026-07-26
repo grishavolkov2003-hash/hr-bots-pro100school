@@ -35,35 +35,16 @@ def test_criteria_ege_not_taken_does_not_block():
     assert qualified is True
 
 
-def test_criteria_fails_no_experience_explicit():
+def test_criteria_no_experience_does_not_block():
+    """Критерий опыта убран из автоотбора (решение Шефа 2026-07-26) -
+    кандидат без опыта проходит автоотбор наравне с опытным, если ЕГЭ и
+    возраст в норме. Опыт остаётся в comment для менеджера, но не блокирует."""
     import main
     qualified, reasons = main.evaluate_auto_criteria({
         "егэ": "80", "опыт": "опыта нет", "возраст": "20",
     })
-    assert qualified is False
-    assert "опыт" in reasons
-
-
-def test_criteria_vague_experience_passes():
-    """'Около года' / 'пару лет' без явных цифр и без явного отказа -
-    считаем что опыт есть (осознанное решение сессии)."""
-    import main
-    qualified, reasons = main.evaluate_auto_criteria({
-        "егэ": "80", "опыт": "около года помогал знакомым", "возраст": "20",
-    })
     assert qualified is True
-
-
-def test_criteria_substring_bug_regression():
-    """РЕГРЕССИЯ: в этой сессии был баг где маркер '0' в NO_EXPERIENCE_MARKERS
-    матчился как подстрока внутри '10 лет'/'20 лет', ошибочно блокируя
-    опытных кандидатов. Баг починен (маркер '0' убран, используется чистое
-    re.findall(\\d+)). Кандидат с 10-летним опытом должен проходить."""
-    import main
-    qualified, reasons = main.evaluate_auto_criteria({
-        "егэ": "70", "опыт": "10 лет преподавания в школе", "возраст": "35",
-    })
-    assert qualified is True, f"Регрессия substring-бага! reasons={reasons}"
+    assert "опыт" not in reasons
 
 
 def test_criteria_underage_fails():

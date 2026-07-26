@@ -20,14 +20,15 @@ def test_criteria_passes_strong_candidate():
     assert qualified is True
 
 
-def test_criteria_substring_bug_regression():
-    """Та же регрессия что и в hr-bot/tests - копия должна вести себя
-    идентично, иначе критерии разъехались между ботами."""
+def test_criteria_no_experience_does_not_block():
+    """Критерий опыта убран из автоотбора (решение Шефа 2026-07-26) - та же
+    правка что в hr-bot/tests, копия должна вести себя идентично."""
     import main
     qualified, reasons = main.evaluate_auto_criteria({
-        "егэ": "70", "опыт": "10 лет преподавания", "возраст": "35",
+        "егэ": "80", "опыт": "опыта нет", "возраст": "20",
     })
-    assert qualified is True, f"Регрессия substring-бага в brosky-bot! reasons={reasons}"
+    assert qualified is True
+    assert "опыт" not in reasons
 
 
 def test_criteria_underage_fails():
