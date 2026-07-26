@@ -20,6 +20,13 @@ client = anthropic.Anthropic(
     api_key=ANTHROPIC_API_KEY,
     base_url=BASE_URL,
     default_headers={"User-Agent": "python-httpx/0.28.1"},
+    # Таймаут 45с вместо дефолтных десятков минут httpx-клиента - origin
+    # прокси customix.fun иногда зависает на всё отведённое ему Cloudflare
+    # время (Error 524, 120с), и без своего таймаута мы бы просто ждали эти
+    # 120с на каждую из двух попыток в _call_llm - кандидат мог провисеть
+    # до ~4 минут, прежде чем система сдастся и пошлёт alert. С 45с - максимум
+    # ~93с (45 + 3 паузы между попытками + 45).
+    timeout=45.0,
 )
 
 
