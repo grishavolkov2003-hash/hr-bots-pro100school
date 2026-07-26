@@ -140,24 +140,34 @@ def _call_llm(system_prompt, messages, log_prefix):
     """Один повтор через 3с при сбое API (наблюдались регулярные короткие
     вспышки 401 Invalid API key у прокси-провайдера - несколько раз за
     сутки, по несколько минут каждая - которые до этого молча хоронили
-    ответ кандидату без единой попытки повтора). Возвращает (text, failed)
-    - failed=True означает что обе попытки провалились, вызывающий код
-    должен просигналить менеджеру, а не просто промолчать."""
+    ответ кандидату без единой попытки повтора).
+
+    Повтор также при truncated (max_tokens hit): у текущего прокси модель
+    тратит переменное количество токенов на невидимый reasoning ещё до
+    видимого текста ответа - бюджет не детерминирован, один и тот же
+    запрос может уложиться со второй попытки, даже не сбой API. Если
+    truncated дважды подряд - тоже считаем сбоем (failed=True), а не
+    молча хороним ответ как раньше: кандидат иначе не получает вообще
+    ничего и никто об этом не узнаёт.
+
+    Возвращает (text, failed) - failed=True означает что обе попытки
+    провалились (по любой причине), вызывающий код должен просигналить
+    менеджеру, а не просто промолчать."""
     for attempt in range(2):
         try:
             response = client.messages.create(
                 model=MODEL,
-                max_tokens=2048,
+                max_tokens=8000,
                 system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
                 messages=messages,
             )
             if response.stop_reason in ("max_tokens", "length"):
-                # Ответ обрублен на середине (не хватило токенов на видимый
-                # текст, например из-за длинного скрытого reasoning) - лучше
-                # не слать кандидату обрывок фразы, чем отправить битое
-                # сообщение. Это не сбой API - повтор тут не поможет.
-                logging.info(f"{log_prefix} truncated (max_tokens hit), пропускаем ответ")
-                return None, False
+                if attempt == 0:
+                    logging.warning(f"{log_prefix} truncated (max_tokens hit, попытка 1/2, повтор через 3с)")
+                    time.sleep(3)
+                    continue
+                logging.error(f"{log_prefix} truncated дважды подряд (попытка 2/2, сдаюсь)")
+                return None, True
             return _strip_thinking(response.content[0].text), False
         except Exception as e:
             if attempt == 0:
