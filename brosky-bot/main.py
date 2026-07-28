@@ -122,6 +122,16 @@ FILE_RECEIVED_ACK = (
     "подписан и отправлен, чтобы я передал его дальше."
 )
 
+# Кандидат нередко присылает несколько файлов подряд (фото, видео, документ)
+# пока собирает материалы - без этого варианта FILE_RECEIVED_ACK улетал бы
+# один в один текстом на каждый файл, что на 3-5 подряд читается как "бот
+# меня не слышит". Короткий вариант шлём, если прошлым сообщением бота уже
+# был любой из двух акков этого файла.
+FILE_RECEIVED_ACK_REPEAT = (
+    "Принял, спасибо! Жду фразу что договор подписан и отправлен - "
+    "отдельным сообщением."
+)
+
 AFTER_SIGNED_TEXT = (
     "После подписания договора нам нужно от вас:\n"
     "1. Ваше фото - для дизайнерской аватарки и карточки профиля на Профи.ру. "
@@ -513,10 +523,16 @@ async def handler(event):
             await client.send_read_acknowledge(event.chat_id)
         except:
             pass
+        prior_conversation = get_conversation(user_id)
+        last_bot_text = next(
+            ((m.get("content") or m.get("text")) for m in reversed(prior_conversation) if m.get("role") == "bot"),
+            None,
+        )
+        ack_text = FILE_RECEIVED_ACK_REPEAT if last_bot_text in (FILE_RECEIVED_ACK, FILE_RECEIVED_ACK_REPEAT) else FILE_RECEIVED_ACK
         add_message(user_id, "candidate", msg_text)
-        add_message(user_id, "bot", FILE_RECEIVED_ACK)
+        add_message(user_id, "bot", ack_text)
         try:
-            await _send_message_safe(event.chat_id, FILE_RECEIVED_ACK)
+            await _send_message_safe(event.chat_id, ack_text)
         except Exception as e:
             logging.warning(f"[handler] File-received-ack send error for {name}: {e}")
         logging.info(f"[handler] Файл получен от {name} ({username}) в ДОГОВОР_ОТПРАВЛЕН - жду ручного подтверждения подписи")
