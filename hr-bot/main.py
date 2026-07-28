@@ -1066,6 +1066,19 @@ async def auto_qualified_sweep_loop():
                     logging.warning(f"[sweep] Застрявший ({decision}): {name} ({username}) - проставлен статус и решение принудительно")
                 else:
                     logging.warning(f"[sweep] Застрявший (без вердикта, анкета не распознана): {name} ({username}) - статус проставлен, решение за человеком")
+                    # Раньше это была только строка в journalctl, которую никто не
+                    # читает - кандидат молча зависал в ТЕСТОВОЕ_НА_ПРОВЕРКЕ без
+                    # единого решения (найдено на живом кейсе Юлии/@gvasilok,
+                    # провисела так 6 дней; та же ситуация встречалась 10 раз
+                    # за две недели). Теперь реальный alert в mx_mish.
+                    try:
+                        await _send_message_safe(
+                            "mx_mish",
+                            f"⚠️ {name} ({username}) - анкета не распозналась автоматически, нужно решение вручную "
+                            f"(одобрить/отклонить).\nКомментарий в базе: {comment or '(пусто)'}"
+                        )
+                    except Exception as e:
+                        logging.warning(f"[sweep] mx_mish alert send error for {name}: {e}")
         except Exception as e:
             logging.error(f"Auto-qualified sweep error: {e}")
 
