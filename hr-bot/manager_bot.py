@@ -28,7 +28,7 @@ MAIN_MENU = ReplyKeyboardMarkup(
         [KeyboardButton("🏆 Топ"), KeyboardButton("📊 Сводка")],
         [KeyboardButton("🔍 Ждут ответа"), KeyboardButton("📅 Созвоны")],
         [KeyboardButton("✅ Созвон назначен"), KeyboardButton("👨‍💼 Переданные")],
-        [KeyboardButton("📝 Договор")],
+        [KeyboardButton("📝 Договор"), KeyboardButton("🔑 Аккаунты")],
     ],
     resize_keyboard=True,
 )
@@ -452,6 +452,43 @@ async def signed(update: Update, context):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
 
 
+async def accounts_received(update: Update, context):
+    """Логин/пароль получены, идёт техническая настройка на Профи.ру - ждём
+    отметки что аккаунт реально открыт и работает. До этой функции статус
+    ОТКРЫТ был в VALID_STATUSES/счётчике сводки, но ни одна кнопка или
+    автоматика нигде в коде его не выставляла - кандидаты застревали в
+    АККАУНТ_ПОЛУЧЕН без возможности закрыть цепочку (найдено 2026-07-29:
+    21 чел. в очереди, некоторые больше месяца, "Открыт" - 1 за всё время,
+    судя по всему выставлен вручную правкой базы в прошлом)."""
+    if update.effective_user.id not in ALLOWED_IDS:
+        return
+
+    candidates = get_candidates_by_status("АККАУНТ_ПОЛУЧЕН")
+    if not candidates:
+        await update.message.reply_text("✅ Нет аккаунтов в настройке.", reply_markup=MAIN_MENU)
+        return
+
+    await update.message.reply_text(f"🔑 Аккаунт получен, в настройке: {len(candidates)} чел.", reply_markup=MAIN_MENU)
+
+    for c in candidates:
+        uid = c["user_id"]
+        name = c.get("name", "?")
+        username = c.get("username", "?")
+        subject = c.get("subject", "?")
+
+        text = (
+            f"🔑 {name} ({username})\n"
+            f"📚 {subject}\n"
+        )
+
+        buttons = [
+            [InlineKeyboardButton("✅ Аккаунт открыт", callback_data=f"opened_{uid}")],
+            [InlineKeyboardButton("❌ Отказался от аккаунта", callback_data=f"refused_account_{uid}")],
+        ]
+
+        await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
 async def handle_text(update: Update, context):
     if update.effective_user.id not in ALLOWED_IDS:
         return
@@ -474,6 +511,8 @@ async def handle_text(update: Update, context):
         return await transferred(update, context)
     elif text == "📝 Договор":
         return await signed(update, context)
+    elif text == "🔑 Аккаунты":
+        return await accounts_received(update, context)
 
 
 # ── Callbacks ──
@@ -611,6 +650,27 @@ async def button_callback(update: Update, context):
         await query.answer("Отмечено!")
         await query.edit_message_text(
             f"🔑 {candidate['name']} ({candidate.get('username', '?')}) — акк получен!"
+        )
+        return
+
+    # ── Account opened (техническая настройка на Профи.ру завершена) ──
+    if data.startswith("opened_"):
+        user_id = int(data.replace("opened_", ""))
+        candidate = get_candidate_by_id(user_id)
+        if not candidate:
+            await query.answer("Кандидат не найден.")
+            return
+
+        if candidate.get("status") == "ОТКРЫТ":
+            await query.answer("Уже отмечен!")
+            await query.edit_message_text(f"⚠️ {candidate['name']} — аккаунт уже открыт")
+            return
+
+        update_candidate_status(user_id, "ОТКРЫТ")
+
+        await query.answer("Отмечено!")
+        await query.edit_message_text(
+            f"✅ {candidate['name']} ({candidate.get('username', '?')}) — аккаунт открыт и работает!"
         )
         return
 
