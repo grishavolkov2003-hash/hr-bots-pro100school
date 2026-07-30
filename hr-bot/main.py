@@ -144,23 +144,30 @@ GARBAGE_MARKERS = [
 DUPLICATE_GUARD_WINDOW_SEC = 50
 
 
+def _seconds_since_last_reply(user_id):
+    """Сколько секунд прошло с последнего ответа боту этому кандидату,
+    или None если ответов ещё не было / время не распарсилось."""
+    conversation = get_conversation(user_id)
+    bot_msgs = [m for m in conversation if m.get("role") == "bot"]
+    if not bot_msgs:
+        return None
+    last_time = bot_msgs[-1].get("time", "")
+    if not last_time:
+        return None
+    try:
+        last_dt = datetime.fromisoformat(last_time)
+        return (datetime.now() - last_dt).total_seconds()
+    except Exception:
+        return None
+
+
 def _recently_sent(user_id):
     """Был ли уже отправлен ЛЮБОЙ ответ этому кандидату за последние
     DUPLICATE_GUARD_WINDOW_SEC секунд, независимо от текста - защита от
     гонок (TOCTOU в patrol_loop, необязанная .cancel() в дебаунсе), а не
     от повторения конкретной фразы."""
-    conversation = get_conversation(user_id)
-    bot_msgs = [m for m in conversation if m.get("role") == "bot"]
-    if not bot_msgs:
-        return False
-    last_time = bot_msgs[-1].get("time", "")
-    if not last_time:
-        return False
-    try:
-        last_dt = datetime.fromisoformat(last_time)
-        return (datetime.now() - last_dt).total_seconds() < DUPLICATE_GUARD_WINDOW_SEC
-    except Exception:
-        return False
+    elapsed = _seconds_since_last_reply(user_id)
+    return elapsed is not None and elapsed < DUPLICATE_GUARD_WINDOW_SEC
 
 
 
@@ -389,11 +396,10 @@ async def handler(event):
     if not msg_text.strip():
         return
 
-    # Прочитать сообщение сразу (галочки)
-    try:
-        await client.send_read_acknowledge(event.chat_id)
-    except:
-        pass
+    # "Прочитано" здесь НЕ ставим - раньше ставили сразу на входящее, и если
+    # дальше guard/debounce молча гасили ответ, кандидат видел "прочитано" без
+    # ответа часами (выглядит как демонстративное игнорирование). Теперь
+    # галочки ставятся непосредственно перед реальной отправкой ответа.
 
     # Кредсы проверяем ДО записи сырого текста в историю/Sheets - логин/пароль
     # от аккаунта profi.ru не должны попадать открытым текстом ни в conversation
@@ -629,12 +635,40 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     clean_response = TASKS_READY_PATTERN.sub("", clean_response)
     clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
+    # РЕГРЕССИЯ (найдена на живом кейсе ooot345266 в brosky-bot, 2026-07-29,
+    # тот же дублированный guard): раньше просто выбрасывал уже сгенерированный
+    # LLM-ответ, если недавно уже отвечали - кандидат реально терял содержательный
+    # ответ и был вынужден переспрашивать по 2-3 раза. "Подождать и всё равно
+    # отправить" ОПАСНЕЕ (проверено регрессионным тестом на brosky-bot,
+    # test_qa_barrier_blocks_concurrent_duplicate_send) - именно это окно
+    # защищает от настоящей гонки двух параллельных вызовов на один и тот же
+    # неотвеченный вопрос, и отложенная отправка эту защиту снимает, просто
+    # доставляя дубль позже. Поэтому дропаем ответ как раньше, но теперь
+    # реально алертим mx_mish с готовым текстом, чтобы человек мог переслать
+    # его вручную, а не терять безвозвратно.
     if clean_response and _recently_sent(user_id):
         logging.warning(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
+        try:
+            await _send_message_safe(
+                "mx_mish",
+                f"⚠️ {name} ({username}) - guard придержал готовый ответ (защита от гонки), "
+                f"перешлите вручную если актуально:\n{clean_response}"
+            )
+        except Exception as e:
+            logging.warning(f"[guard] mx_mish alert send error for {name}: {e}")
         clean_response = ""
 
     if clean_response:
         clean_response = clean_response.replace("—", "-").replace("–", "-")
+
+        # "Прочитано" ставим здесь, а не сразу на входящее в хендлере - раньше
+        # галочки появлялись мгновенно даже если guard потом молча гасил ответ
+        # (найдено на живом кейсе ooot345266 в brosky-bot, 2026-07-29) -
+        # выглядело как "бот увидел и демонстративно проигнорировал".
+        try:
+            await client.send_read_acknowledge(chat_id)
+        except Exception:
+            pass
 
         # Имитация печатания (скип для тестовых)
         candidate_now = get_candidate(user_id)
@@ -1309,12 +1343,28 @@ async def _patrol_respond(user_id, username, name, delay):
         clean_response = TASKS_READY_PATTERN.sub("", clean_response)
         clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
+        # Дропаем ответ как раньше (сохраняем защиту от гонки - см. подробный
+        # комментарий в _do_process выше), но алертим mx_mish с готовым текстом.
         if clean_response and _recently_sent(user_id):
             logging.warning(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
+            try:
+                await _send_message_safe(
+                    "mx_mish",
+                    f"⚠️ {name} ({username}) - guard придержал готовый ответ (защита от гонки), "
+                    f"перешлите вручную если актуально:\n{clean_response}"
+                )
+            except Exception as e:
+                logging.warning(f"[patrol][guard] mx_mish alert send error for {name}: {e}")
             clean_response = ""
 
         if clean_response:
             clean_response = clean_response.replace("—", "-").replace("–", "-")
+            # "Прочитано" ставим здесь - см. комментарий в _do_process выше
+            # (та же регрессия, живой кейс ooot345266).
+            try:
+                await client.send_read_acknowledge(user_id)
+            except Exception:
+                pass
             is_instant = username and username.lower() in INSTANT_USERS
             if not is_instant:
                 await _simulate_typing(user_id, len(clean_response))

@@ -123,7 +123,10 @@ async def test_qa_barrier_blocks_concurrent_duplicate_send(make_candidate, monke
     send_calls = []
 
     async def fake_send_message(chat_id, text):
-        send_calls.append(text)
+        send_calls.append((chat_id, text))
+
+    async def fake_read_ack(*a, **kw):
+        pass
 
     async def fake_simulate_typing(*a, **kw):
         pass
@@ -132,6 +135,7 @@ async def test_qa_barrier_blocks_concurrent_duplicate_send(make_candidate, monke
         return "Комиссия 25%, всё как в договоре.", False
 
     monkeypatch.setattr(main.client, "send_message", fake_send_message)
+    monkeypatch.setattr(main.client, "send_read_acknowledge", fake_read_ack)
     monkeypatch.setattr(main, "_simulate_typing", fake_simulate_typing)
     monkeypatch.setattr(main, "get_qa_response", fake_get_qa_response)
 
@@ -140,7 +144,11 @@ async def test_qa_barrier_blocks_concurrent_duplicate_send(make_candidate, monke
         main._process_qa_after_delay(701, "test", "Т", 701, delay=0),
     )
 
-    assert len(send_calls) == 1, f"Ожидали ровно 1 реальную отправку, получили {len(send_calls)}: {send_calls}"
+    # Барьер должен не пустить дубль КАНДИДАТУ (chat_id=701) - если второй
+    # вызов вместо этого ушёл алертом в mx_mish (см. регрессия ooot345266,
+    # 2026-07-29), это отдельный, легитимный получатель, не дубль кандидату.
+    candidate_calls = [text for chat_id, text in send_calls if chat_id == 701]
+    assert len(candidate_calls) == 1, f"Ожидали ровно 1 реальную отправку кандидату, получили {len(candidate_calls)}: {send_calls}"
 
 
 # ── decision_loop: каскад не блокируется барьером (регрессия/формализация Теста 5, 17.07) ──

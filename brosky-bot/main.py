@@ -187,24 +187,31 @@ GARBAGE_MARKERS = [
 DUPLICATE_GUARD_WINDOW_SEC = 50
 
 
+def _seconds_since_last_reply(user_id):
+    """Сколько секунд прошло с последнего ответа боту этому кандидату,
+    или None если ответов ещё не было / время не распарсилось."""
+    conversation = get_conversation(user_id)
+    bot_msgs = [m for m in conversation if m.get("role") == "bot"]
+    if not bot_msgs:
+        return None
+    last_time = bot_msgs[-1].get("time", "")
+    if not last_time:
+        return None
+    try:
+        last_dt = datetime.fromisoformat(last_time)
+        return (datetime.now() - last_dt).total_seconds()
+    except Exception:
+        return None
+
+
 def _recently_sent(user_id):
     """Был ли уже отправлен ЛЮБОЙ ответ этому кандидату за последние
     DUPLICATE_GUARD_WINDOW_SEC секунд, независимо от текста - защита от
     гонок (TOCTOU в patrol_loop, необязанная .cancel() в дебаунсе), а не
     от повторения конкретной фразы (LLM почти никогда не генерирует
     побайтово одинаковый текст, сравнение по содержимому ничего бы не ловило)."""
-    conversation = get_conversation(user_id)
-    bot_msgs = [m for m in conversation if m.get("role") == "bot"]
-    if not bot_msgs:
-        return False
-    last_time = bot_msgs[-1].get("time", "")
-    if not last_time:
-        return False
-    try:
-        last_dt = datetime.fromisoformat(last_time)
-        return (datetime.now() - last_dt).total_seconds() < DUPLICATE_GUARD_WINDOW_SEC
-    except Exception:
-        return False
+    elapsed = _seconds_since_last_reply(user_id)
+    return elapsed is not None and elapsed < DUPLICATE_GUARD_WINDOW_SEC
 
 
 def parse_anketa(raw):
@@ -541,11 +548,11 @@ async def handler(event):
     if not msg_text.strip():
         return
 
-    # Прочитать сообщение сразу (галочки)
-    try:
-        await client.send_read_acknowledge(event.chat_id)
-    except:
-        pass
+    # "Прочитано" здесь НЕ ставим - раньше ставили сразу на входящее, и если
+    # дальше guard/debounce молча гасили ответ, кандидат видел "прочитано" без
+    # ответа часами (выглядит как демонстративное игнорирование, хуже чем
+    # непрочитанное). Теперь галочки ставятся непосредственно перед реальной
+    # отправкой ответа - см. _process_qa_message/_do_process/_patrol_respond.
 
     # Кредсы проверяем ДО записи сырого текста в историю/Sheets - логин/пароль
     # от аккаунта profi.ru не должны попадать открытым текстом ни в conversation
@@ -746,12 +753,40 @@ async def _process_qa_message(user_id, username, name, chat_id):
     # ся молча, если недавно уже отвечали (найдено ревью критика). Теперь,
     # как и в _do_process, гасим только текст ответа, остальная обработка
     # (сигналы, пересылка договора) идёт своим чередом независимо от неё.
+    #
+    # РЕГРЕССИЯ (найдена на живом кейсе ooot345266, 2026-07-29): guard молча
+    # выбрасывал уже сгенерированный LLM ответ, если недавно уже отвечали -
+    # кандидат реально терял содержательный ответ и был вынужден переспрашивать
+    # по 2-3 раза. Откладывать отправку до истечения окна - ОПАСНЕЕ (проверено
+    # регрессионным тестом test_qa_barrier_blocks_concurrent_duplicate_send):
+    # именно это окно защищает от настоящей гонки двух параллельных вызовов на
+    # один и тот же неотвеченный вопрос, и "подождать и всё равно отправить"
+    # эту защиту снимает - дубль просто уходит позже. Поэтому дропаем ответ
+    # как раньше, но теперь реально алертим mx_mish с готовым текстом, чтобы
+    # человек мог вручную переслать его кандидату, а не терять безвозвратно.
     if clean_response and _recently_sent(user_id):
         logging.warning(f"[qa][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
+        try:
+            await _send_message_safe(
+                "mx_mish",
+                f"⚠️ {name} ({username}) - guard придержал готовый ответ (защита от гонки), "
+                f"перешлите вручную если актуально:\n{clean_response}"
+            )
+        except Exception as e:
+            logging.warning(f"[qa][guard] mx_mish alert send error for {name}: {e}")
         clean_response = ""
 
     if clean_response:
         clean_response = clean_response.replace("—", "-").replace("–", "-")
+        # "Прочитано" ставим здесь, а не сразу на входящее сообщение в хендлере -
+        # раньше галочки появлялись мгновенно даже если guard потом молча гасил
+        # ответ (найдено на живом кейсе ooot345266, 2026-07-29) - выглядело как
+        # "бот увидел и демонстративно проигнорировал", что хуже чем не увидел
+        # вообще. Теперь галочки появляются ровно тогда, когда реально отвечаем.
+        try:
+            await client.send_read_acknowledge(chat_id)
+        except Exception:
+            pass
         is_instant = username and username.lower().lstrip("@") in INSTANT_USERS
         if not is_instant:
             await _simulate_typing(chat_id, len(clean_response))
@@ -888,13 +923,30 @@ async def _do_process(user_id, username, name, chat_id, candidate):
     clean_response = TASKS_READY_PATTERN.sub("", clean_response)
     clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
+    # Дропаем ответ как раньше (сохраняем защиту от гонки - см. подробный
+    # комментарий в _process_qa_message выше), но алертим mx_mish с готовым
+    # текстом, чтобы человек мог переслать его вручную, а не терять безвозвратно.
     if clean_response and _recently_sent(user_id):
         logging.warning(f"[guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
+        try:
+            await _send_message_safe(
+                "mx_mish",
+                f"⚠️ {name} ({username}) - guard придержал готовый ответ (защита от гонки), "
+                f"перешлите вручную если актуально:\n{clean_response}"
+            )
+        except Exception as e:
+            logging.warning(f"[guard] mx_mish alert send error for {name}: {e}")
         clean_response = ""
 
     if clean_response:
         clean_response = clean_response.replace("—", "-").replace("–", "-")
 
+        # "Прочитано" ставим здесь, а не сразу на входящее - см. комментарий
+        # в _process_qa_message (та же регрессия, живой кейс ooot345266).
+        try:
+            await client.send_read_acknowledge(chat_id)
+        except Exception:
+            pass
         # Имитация печатания (скип для тестовых)
         candidate_now = get_candidate(user_id)
         c_username = (candidate_now or {}).get("username", "")
@@ -1525,12 +1577,26 @@ async def _patrol_respond(user_id, username, name, delay):
         clean_response = TASKS_READY_PATTERN.sub("", clean_response)
         clean_response = re.sub(r"\n{3,}", "\n\n", clean_response).strip()
 
-        if clean_response and _recently_sent(user_id):
-            logging.warning(f"[patrol][guard] Пропущена отправка {name} - уже отвечали за последние {DUPLICATE_GUARD_WINDOW_SEC} сек")
-            clean_response = ""
+        # Не выбрасываем готовый ответ, а ждём остаток окна guard и отправляем -
+        # см. подробный комментарий в _process_qa_message выше (та же регрессия).
+        if clean_response:
+            elapsed = _seconds_since_last_reply(user_id)
+            if elapsed is not None and elapsed < DUPLICATE_GUARD_WINDOW_SEC:
+                wait_s = DUPLICATE_GUARD_WINDOW_SEC - elapsed + 1
+                logging.warning(f"[patrol][guard] Отправка {name} отложена на {wait_s:.0f}с - уже отвечали недавно")
+                await asyncio.sleep(wait_s)
+                if _recently_sent(user_id):
+                    logging.warning(f"[patrol][guard] Пропущена отправка {name} - другой ответ ушёл пока ждали")
+                    clean_response = ""
 
         if clean_response:
             clean_response = clean_response.replace("—", "-").replace("–", "-")
+            # "Прочитано" ставим здесь - см. комментарий в _process_qa_message
+            # (та же регрессия, живой кейс ooot345266).
+            try:
+                await client.send_read_acknowledge(user_id)
+            except Exception:
+                pass
             is_instant = username and username.lower() in INSTANT_USERS
             if not is_instant:
                 await _simulate_typing(user_id, len(clean_response))
